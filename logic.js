@@ -22,6 +22,8 @@ export const MAX_POR_OBJETIVO = 2;
 export const TAREAS_EN_ORDEN = 2;
 export const DIAS_PARA_BIENVENIDA = 3;
 export const CERCA_DE_LA_META = 0.75;
+// Un ritmo semanal atrasado suma hasta 70 puntos (más de lo que suma una tarea olvidada sin plazo).
+export const PUNTOS_ATRASO_RITMO = 70;
 export const DIAS_SECUNDARIO_OLVIDADO = 7;
 // Una tarea sin pasos avanza según el tiempo trabajado, pero nunca pasa de 90% hasta que la terminas.
 export const TOPE_POR_TIEMPO = 0.9;
@@ -39,7 +41,7 @@ export const PASOS_BASE = Object.freeze([
 
 const LIMITES = {
   proyectos: 200, objetivos: 1000, tareas: 5000, pasos: 50, registros: 50000, notas: 20000,
-  texto: 300, criterio: 500, nota: 2000, descripcion: 5000, minutos: 1440, metaMinutos: 100000, etapa: 100, bandeja: 500, momento: 120,
+  texto: 300, criterio: 500, nota: 2000, descripcion: 5000, minutos: 1440, metaMinutos: 100000, etapa: 100, bandeja: 500, momento: 120, nombreTurno: 30,
 };
 // Al crear tareas desde una lista (una por línea) parten como medias de 1 h; se ajustan después.
 export const TAREA_RAPIDA = Object.freeze({ tamano: 'media', minutos: 60 });
@@ -243,10 +245,31 @@ export function ordenarProyectos(datos, hoy) {
 
 // ---------- Capacidad del día ----------
 
+/** Turnos de enfermería típicos: largo, noche, saliente y libre. Los minutos son un punto de partida para ajustar. */
+export const CICLO_CUARTO_TURNO = Object.freeze({ nombres: ['Largo', 'Noche', 'Saliente', 'Libre'], minutos: [30, 60, 45, 240] });
+export const CICLO_MIN = 2;
+export const CICLO_MAX = 14;
+
+/** Día del ciclo de turnos para una fecha (índice desde 0), o null si no hay ciclo. */
+export function diaDelCiclo(disponibilidad, fecha) {
+  const c = disponibilidad.ciclo;
+  if (!c) return null;
+  const k = c.minutos.length;
+  const i = (((diasEntre(c.inicio, fecha) % k) + k) % k);
+  return { indice: i, numero: i + 1, total: k, nombre: c.nombres[i] ?? '', minutos: c.minutos[i] };
+}
+
+/** Minutos libres de tu semana normal o de tu ciclo de turnos (sin contar los días especiales). */
+export function minutosBase(disponibilidad, fecha) {
+  const ciclo = diaDelCiclo(disponibilidad, fecha);
+  if (ciclo) return ciclo.minutos;
+  return disponibilidad.plantilla[diaSemana(fecha)] ?? 0;
+}
+
 export function minutosLibres(disponibilidad, fecha) {
   const excepcion = disponibilidad.excepciones?.[fecha];
   if (excepcion !== undefined && excepcion !== null) return excepcion;
-  return disponibilidad.plantilla[diaSemana(fecha)] ?? 0;
+  return minutosBase(disponibilidad, fecha);
 }
 
 /** Capacidad = minutos libres × 0,7: margen por la falacia de planificación. */
@@ -375,9 +398,16 @@ export function candidatos(datos, hoy) {
       let puntos = 5;
       const hecho = minutosRegistrados(datos, o.id, o.periodo, hoy);
       if (o.periodo === 'semana') {
-        const esperado = (o.minutosMeta * indiceEnSemana(hoy)) / 7;
-        if (hecho < esperado) puntos += Math.round((40 * (esperado - hecho)) / o.minutosMeta);
-        motivos.push(`Vas ${formatoDuracion(hecho)} de ${formatoDuracion(o.minutosMeta)} esta semana`);
+        // Atraso respecto de lo esperado a esta altura de la semana (hasta 70 puntos), y un empujón
+        // cuando quedan 3 días o menos y lo que falta ya no cabe a ritmo normal: si no, una tarea
+        // vieja le gana siempre y el ritmo semanal se queda en cero.
+        const indice = indiceEnSemana(hoy);
+        const esperado = (o.minutosMeta * indice) / 7;
+        if (hecho < esperado) puntos += Math.round((PUNTOS_ATRASO_RITMO * (esperado - hecho)) / o.minutosMeta);
+        const quedan = 7 - indice;
+        const apurado = quedan <= 3 && (o.minutosMeta - hecho) / quedan > (1.5 * o.minutosMeta) / 7;
+        if (apurado) puntos += 15;
+        motivos.push(`Vas ${formatoDuracion(hecho)} de ${formatoDuracion(o.minutosMeta)} esta semana${apurado ? ` y ${quedan === 1 ? 'hoy es el último día' : `quedan ${quedan} días`}` : ''}`);
       } else {
         motivos.push(`Llevas ${formatoDuracion(hecho)} de ${formatoDuracion(o.minutosMeta)}`);
       }
@@ -412,6 +442,8 @@ export function candidatos(datos, hoy) {
     // Las tareas van en orden: se recomiendan solo las primeras pendientes del objetivo
     // (no "Enviar la postulación" antes de "Leer las bases"), salvo que una tenga su propio plazo cercano.
     const enOrden = new Set(pendientes.slice(0, TAREAS_EN_ORDEN).map((t) => t.id));
+    // En objetivos de 3 o más tareas, la última (suele ser "Enviar" o "Entregar") espera a que las demás estén hechas.
+    if (tareas.length >= 3 && pendientes.length > 1) enOrden.delete(pendientes.at(-1).id);
     // Gradiente de meta: cerca de lograr el objetivo, el impulso sube (Kivetz y otros, 2006).
     const avanceObjetivo = progresoObjetivo(o, datos, hoy).valor;
     const cerca = pendientes.length === 1
@@ -450,6 +482,8 @@ export function candidatos(datos, hoy) {
       const siguiente = t.pasos.find((x) => !x.hecho);
       if (siguiente) motivos.push(`Siguiente paso: ${siguiente.texto}`);
       if (!motivos.length) motivos.push(`Avanza tu objetivo "${o.nombre}"`);
+      // En empate, primero la que va antes en el orden (y no la más corta).
+      if (t.id === pendientes[0].id && pendientes.length > 1) puntos += 1;
       lista.push({
         clave, tipo: 'tarea', proyecto: p, objetivo: o, tarea: t, minutos: minutosSesion(t, datos), puntos, motivos, ajustable: t.tamano !== 'simple',
         vencido: t.plazo ? vencido(t.plazo, 'tarea', t.id) : vencido(o.plazo, 'objetivo', o.id),
@@ -775,6 +809,67 @@ export function leerIdeasObjetivos(texto) {
   return { ok: ideas.length > 0, ideas, errores: ideas.length ? errores : [...errores, 'No quedó ningún objetivo válido.'] };
 }
 
+// ---------- ¿Qué es esto? (clasificar algo antes de cargarlo) y tutorial ----------
+
+/**
+ * Árbol de preguntas sí/no para decidir si algo es proyecto (principal, secundario o en pausa), objetivo,
+ * tarea o algo que no va en Rumbo. Cada respuesta lleva a otra pregunta o a un resultado. Es una guía
+ * práctica de organización, no ciencia.
+ */
+export const PREGUNTAS_CLASIFICAR = Object.freeze({
+  corta: { texto: '¿Se puede hacer en menos de 15 minutos?', ayuda: 'Una llamada, un correo, un trámite rápido.', si: 'parte', no: 'sentadas' },
+  parte: { texto: '¿Es parte de un proyecto que tienes o quieres tener?', ayuda: 'Por ejemplo, «pedir la carta de recomendación» es parte de «Postular a la UCI».', si: 'tarea-simple', no: 'fuera' },
+  sentadas: { texto: '¿Lo terminas en una o pocas sentadas, unas horas en total?', ayuda: 'Por ejemplo, «actualizar el CV» o «leer las bases del concurso».', si: 'tarea', no: 'final' },
+  final: { texto: '¿Tiene un final claro, un día en que dirás «listo, lo logré»?', ayuda: '«Aprobar el concurso» tiene final. «Estudiar inglés» no.', si: 'varias', no: 'constancia' },
+  constancia: { texto: '¿Es algo que quieres hacer con constancia, como estudiar, practicar o entrenar?', ayuda: 'Lo que importa es dedicarle tiempo cada semana, no terminarlo.', si: 'objetivo-tiempo', no: 'idea' },
+  varias: { texto: '¿Necesita 3 o más acciones distintas, durante semanas?', ayuda: '«Postular a la UCI» necesita CV, cartas, documentos y entrevista.', si: 'importa', no: 'objetivo' },
+  importa: { texto: 'Si este mes solo pudieras avanzar 2 cosas, ¿estaría esta?', ayuda: 'Piensa en plazos, en tu trabajo, tu plata o tu carrera.', si: 'principal', no: 'este-mes' },
+  'este-mes': { texto: '¿Quieres avanzarla este mes, aunque sea un poco?', ayuda: 'Si es para «algún día», mejor dejarla en pausa.', si: 'secundario', no: 'pausado' },
+});
+
+export const RESULTADOS_CLASIFICAR = Object.freeze({
+  'tarea-simple': { pieza: 'tarea', nombre: 'Una tarea simple', texto: 'Va dentro de un objetivo de su proyecto. Rumbo te la recomendará cuando tengas un rato.' },
+  fuera: { pieza: 'fuera', nombre: 'No va en Rumbo', texto: 'Rumbo es para proyectos. Hazla ahora o déjala en los recordatorios del teléfono: así no llena tu lista.' },
+  tarea: { pieza: 'tarea', nombre: 'Una tarea', texto: 'Va dentro de un objetivo. Si dura más de 2 horas, márcala amplia y pártela en pasos.' },
+  'objetivo-tiempo': { pieza: 'objetivo', nombre: 'Un objetivo de tiempo', texto: 'Va dentro de un proyecto, como «Dedicarle tiempo»: por ejemplo, 3 horas por semana. Avanza con los minutos que registras.' },
+  idea: { pieza: 'idea', nombre: 'Todavía es una idea', texto: 'Aún no está claro qué quieres lograr. Déjala en «Por ordenar» y decide en tu revisión semanal.' },
+  objetivo: { pieza: 'objetivo', nombre: 'Un objetivo', texto: 'Un resultado concreto dentro de un proyecto. Escribe cómo sabrás que lo lograste y las tareas para llegar.' },
+  principal: { pieza: 'proyecto', tipoProyecto: 'principal', nombre: 'Un proyecto principal', texto: 'Es donde está tu foco: Rumbo lo recomienda primero. Mejor tener solo 2 o 3 a la vez.' },
+  secundario: { pieza: 'proyecto', tipoProyecto: 'secundario', nombre: 'Un proyecto secundario', texto: 'Avanza cuando te sobra tiempo. Si pasa 7 días sin avanzar, Rumbo te lo recuerda.' },
+  pausado: { pieza: 'proyecto', tipoProyecto: 'secundario', estado: 'pausado', nombre: 'Un proyecto para más adelante', texto: 'Créalo en pausa: sale de tu cabeza sin pedirte tiempo. Lo activas cuando sea su momento.' },
+});
+
+/** Sigue las respuestas (true = sí) desde la primera pregunta: devuelve la pregunta siguiente o el resultado. */
+export function pasoClasificar(respuestas = []) {
+  let id = 'corta';
+  for (const r of respuestas) {
+    const p = PREGUNTAS_CLASIFICAR[id];
+    if (!p) break;
+    id = r ? p.si : p.no;
+  }
+  if (PREGUNTAS_CLASIFICAR[id]) return { tipo: 'pregunta', id, numero: respuestas.length + 1, ...PREGUNTAS_CLASIFICAR[id] };
+  return { tipo: 'resultado', id, ...RESULTADOS_CLASIFICAR[id] };
+}
+
+/** Proyectos principales activos: con más de 3, todo avanza lento. */
+export const principalesActivos = (d) => d.proyectos.filter((p) => p.tipo === 'principal' && p.estado === 'activo').length;
+
+/**
+ * Lo que el tutorial sigue en vivo a partir de tus datos reales. `libres` viene de fuera:
+ * se marca cuando guardas tus minutos libres o confirmas que están bien.
+ */
+export function avanceTutorial(d, { libres = false } = {}) {
+  return {
+    proyecto: d.proyectos.length > 0,
+    objetivo: d.objetivos.length > 0,
+    tareas: d.tareas.length,
+    tiempo: d.objetivos.some((o) => o.tipo === 'tiempo'),
+    libres,
+    aceptada: Object.values(d.planes).some((p) => p.items.length > 0),
+    registrada: d.registros.length > 0 || d.tareas.some((t) => t.hecha),
+  };
+}
+
 // ---------- Respaldo ----------
 
 export function diasSinRespaldo(meta, hoy) {
@@ -797,7 +892,7 @@ export function datosVacios(hoy) {
     planes: {},
     bandeja: [],
     foco: { semana: null, objetivos: [] },
-    disponibilidad: { plantilla: [...PLANTILLA_POR_DEFECTO], excepciones: {} },
+    disponibilidad: { plantilla: [...PLANTILLA_POR_DEFECTO], excepciones: {}, ciclo: null },
     meta: { ...metaVacia(), creado: hoy },
   };
 }
@@ -820,6 +915,27 @@ export function nuevoObjetivo(campos) {
 /** Tarea nueva con todos sus campos. */
 export function nuevaTarea(campos) {
   return { tamano: 'media', minutos: 60, plazo: null, pasos: [], hecha: false, hechaEl: null, tocado: null, ...campos };
+}
+
+/**
+ * Al terminar la última tarea de un objetivo de resultado, queda logrado: así no se celebra
+ * y después se pide "planificarlo" con el plazo vencido. Devuelve true si cambió.
+ */
+export function cerrarSiTerminado(d, objetivoId) {
+  const o = d.objetivos.find((x) => x.id === objetivoId);
+  if (!o || o.tipo !== 'resultado' || o.logrado) return false;
+  const tareas = tareasDe(d, objetivoId);
+  if (!tareas.length || tareas.some((t) => !t.hecha)) return false;
+  o.logrado = true;
+  return true;
+}
+
+/** Si vuelve a haber algo pendiente (tarea nueva o reabierta), el objetivo deja de estar logrado. */
+export function reabrirSiPendiente(d, objetivoId) {
+  const o = d.objetivos.find((x) => x.id === objetivoId);
+  if (!o || !o.logrado || !tareasDe(d, objetivoId).some((t) => !t.hecha)) return false;
+  o.logrado = false;
+  return true;
 }
 
 /** Tareas a partir de un texto con una tarea por línea (como medias de 1 h, que se ajustan después). */
@@ -1082,6 +1198,14 @@ export function validarDatos(d) {
     for (const [f, m] of Object.entries(disp.excepciones)) {
       if (!esFechaValida(f) || !esEntero(m, 0, LIMITES.minutos)) e.push(`disponibilidad: excepción ${f.slice(0, 20)} no válida`);
     }
+  }
+  const ciclo = disp?.ciclo;
+  if (ciclo !== undefined && ciclo !== null && (
+    typeof ciclo !== 'object' || !esFechaValida(ciclo.inicio) || !Array.isArray(ciclo.minutos) ||
+    ciclo.minutos.length < CICLO_MIN || ciclo.minutos.length > CICLO_MAX || !ciclo.minutos.every((m) => esEntero(m, 0, LIMITES.minutos)) ||
+    !Array.isArray(ciclo.nombres) || ciclo.nombres.length !== ciclo.minutos.length || !ciclo.nombres.every((n) => typeof n === 'string' && n.length <= LIMITES.nombreTurno)
+  )) {
+    e.push('disponibilidad: ciclo de turnos no válido');
   }
   const m = d.meta;
   if (!m || !esFechaOpcional(m.creado) || !esFechaOpcional(m.ultimoRespaldo) || !esFechaOpcional(m.ultimaVisita) || !esFechaOpcional(m.ultimaRevision) ||

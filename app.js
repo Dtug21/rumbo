@@ -1,6 +1,6 @@
 // app.js — interfaz de Rumbo. Las decisiones (progreso, recomendaciones, validación) viven en logic.js.
 import * as L from './logic.js';
-import { cargar, guardar, crearId, guardarCopiaPrevia, leerCopiaPrevia } from './store.js';
+import { cargar, guardar, crearId, guardarCopiaPrevia, leerCopiaPrevia, pedirPersistencia } from './store.js';
 import { proyectoEjemplo } from './ejemplo.js';
 import { PLANTILLAS, aplicarPlantilla } from './plantillas.js';
 
@@ -12,13 +12,22 @@ const hoy = () => L.hoyLocal();
 const inicio = cargar(hoy());
 let datos = inicio.datos;
 let avisoCarga = inicio.aviso;
-if (inicio.nuevo) guardar(datos);
+let errorGuardado = false; // el navegador no dejó guardar el último cambio (lleno o bloqueado)
+
+/** Guarda y, si el navegador se niega, lo deja a la vista: nunca perder cambios en silencio. */
+function persistir(d) {
+  errorGuardado = !guardar(d);
+  return !errorGuardado;
+}
+if (inicio.nuevo) persistir(datos);
+// Con datos que cuidar, se pide al navegador que no los borre por falta de espacio.
+if (datos.proyectos.length) pedirPersistencia();
 // Regreso: cuántos días pasaron desde la última vez que abriste Rumbo (se anota una vez por día, sin deshacer).
 const diasAusente = L.diasFuera(datos.meta, hoy());
 let bienvenidaVista = false;
 if (datos.meta.ultimaVisita !== hoy()) {
   datos = { ...datos, meta: { ...datos.meta, ultimaVisita: hoy() } };
-  guardar(datos);
+  persistir(datos);
 }
 let deshacerTexto = null;
 let erroresImportacion = [];
@@ -120,10 +129,13 @@ function cambiar(fn, mensaje, { celebrar = null } = {}) {
   const previo = datos;
   const copia = structuredClone(datos);
   fn(copia);
+  const primerProyecto = !datos.proyectos.length && copia.proyectos.length;
   datos = copia;
-  guardar(datos);
+  const guardado = persistir(datos);
   deshacerTexto = antes;
   render();
+  if (!guardado) return avisar('No pude guardar este cambio en el equipo. Mira el aviso de arriba.', false, 'error');
+  if (primerProyecto) pedirPersistencia();
   const logro = celebrar ? L.celebracion(previo, datos, celebrar, hoy()) : null;
   if (logro) avisar(logro.grande ? logro.texto : `${mensaje ? `${mensaje} ` : ''}${logro.texto}`, true, logro.grande ? 'grande' : 'avance');
   else if (mensaje) avisar(mensaje, true);
@@ -139,7 +151,7 @@ function deshacer() {
   if (!deshacerTexto) return;
   datos = JSON.parse(deshacerTexto);
   deshacerTexto = null;
-  guardar(datos);
+  persistir(datos);
   render();
   avisar('Listo, deshecho.');
 }
@@ -176,7 +188,10 @@ function limpiarReferencias(d, { tareas = new Set(), objetivos = new Set() }) {
     .map((r) => (tareas.has(r.tareaId) ? { ...r, tareaId: null } : r));
 }
 
-/** Al terminar una tarea que estaba en el plan de hoy, esa sesión cuenta como hecha y registra sus minutos. */
+/**
+ * Al terminar una tarea que estaba en el plan de hoy, esa sesión cuenta como hecha y registra sus minutos.
+ * Si era la última de su objetivo, el objetivo queda logrado (se celebra y deja de pedir planificarlo).
+ */
 function marcarTerminada(d, t) {
   const f = hoy();
   t.hecha = true;
@@ -185,6 +200,7 @@ function marcarTerminada(d, t) {
   const plan = L.planDeHoy(d, f);
   const item = plan.items.find((i) => i.tareaId === t.id && !i.hecho);
   if (item) completarItem(d, item.id, item.minutos);
+  L.cerrarSiTerminado(d, t.objetivoId);
 }
 
 function completarItem(d, itemId, minutos) {
@@ -201,27 +217,33 @@ function completarItem(d, itemId, minutos) {
 
 function rutaActual() {
   const [, nombre = 'hoy', id = ''] = location.hash.split('/');
-  return { nombre: ['hoy', 'dia', 'proyectos', 'proyecto', 'ajustes'].includes(nombre) ? nombre : 'hoy', id: decodeURIComponent(id) };
+  return { nombre: ['hoy', 'dia', 'proyectos', 'proyecto', 'ajustes', 'guia'].includes(nombre) ? nombre : 'hoy', id: decodeURIComponent(id) };
 }
 
 function render() {
   const foco = document.activeElement?.dataset?.foco;
   const ruta = rutaActual();
   diaRenderizado = hoy();
-  const vistas = { hoy: vistaHoy, dia: vistaDiaPasado, proyectos: vistaProyectos, proyecto: vistaProyecto, ajustes: vistaAjustes };
+  const vistas = { hoy: vistaHoy, dia: vistaDiaPasado, proyectos: vistaProyectos, proyecto: vistaProyecto, ajustes: vistaAjustes, guia: vistaGuia };
+  const sinGuardar = errorGuardado
+    ? `<div class="aviso error-guardado" role="alert"><p><strong>No pude guardar tus últimos cambios en este equipo.</strong> El almacenamiento del navegador está lleno o bloqueado. Lo que hiciste sigue aquí mientras no cierres esta página: descarga un respaldo ahora.</p>
+        <div class="fila-botones">${boton('exportar', 'Descargar respaldo', { clase: 'chico primario' })}${boton('reintentar-guardar', 'Reintentar guardar')}</div></div>`
+    : '';
   $main.innerHTML =
-    (avisoCarga ? `<div class="aviso" role="alert"><p>${esc(avisoCarga)}</p>${boton('cerrar-aviso', 'Entendido')}</div>` : '') + vistas[ruta.nombre](ruta.id);
+    sinGuardar + (avisoCarga ? `<div class="aviso" role="alert"><p>${esc(avisoCarga)}</p>${boton('cerrar-aviso', 'Entendido')}</div>` : '') + vistas[ruta.nombre](ruta.id);
   const seccion = { proyecto: 'proyectos' }[ruta.nombre] ?? ruta.nombre;
   for (const a of document.querySelectorAll('.nav a')) {
     if (a.dataset.ruta === seccion) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   }
-  const nombres = { hoy: 'Mi día', dia: 'Historial', proyectos: 'Proyectos', proyecto: 'Proyectos', ajustes: 'Ajustes' };
+  const nombres = { hoy: 'Mi día', dia: 'Historial', proyectos: 'Proyectos', proyecto: 'Proyectos', ajustes: 'Ajustes', guia: 'Guía' };
   const proyecto = ruta.nombre === 'proyecto' ? buscar(datos.proyectos, ruta.id) : null;
   document.getElementById('miga').textContent = ['Mi espacio', nombres[ruta.nombre], proyecto?.nombre].filter(Boolean).join('   /   ');
   document.getElementById('fecha-top').textContent = fechaLarga(hoy());
   document.title = `${proyecto?.nombre ?? nombres[ruta.nombre]} · Rumbo`;
   if (foco) $main.querySelector(`[data-foco="${CSS.escape(foco)}"]`)?.focus();
+  seguirTutorial();
+  pintarTutorial();
 }
 
 // ---------- Bienvenida ----------
@@ -260,6 +282,7 @@ function bienvenida() {
         ${boton('ver-plantillas', `${icono('chispa')} Empezar desde una idea`, { clase: 'boton-contorno', etiqueta: 'Empezar desde una idea' })}
         ${boton('cargar-ejemplo', 'Ver un ejemplo', { clase: 'boton-contorno' })}
       </div>
+      <p class="heroe-texto bienvenida-duda">¿No sabes si algo es proyecto, objetivo o tarea? ${boton('clasificar', '¿Qué es esto?', { clase: 'boton-contorno chico' })}</p>
     </section>`;
 }
 
@@ -477,13 +500,26 @@ function bandejaHtml() {
   if (!datos.bandeja.length) return '';
   return `<section class="tarjeta bandeja" aria-labelledby="bandeja-titulo">
     <div class="item-cabeza"><h2 id="bandeja-titulo" class="titulo-tarjeta">Por ordenar (${datos.bandeja.length})</h2>${icono('bandera', 'icono-suave')}</div>
-    <p class="ayuda">Lo que anotaste rápido. Dale un objetivo para que entre a tus recomendaciones, o descártalo.</p>
+    <p class="ayuda">Lo que anotaste rápido. Dale un objetivo para que entre a tus recomendaciones, o descártalo. Si no sabes qué es, toca «¿Qué es?».</p>
     <ul class="lista-bandeja">${datos.bandeja
       .map((b) => `<li><span>${esc(b.texto)}</span><span class="acciones-nota">
         ${boton('ordenar', 'Ordenar', { id: b.id, clase: 'chico primario', etiqueta: `Ordenar: ${b.texto}` })}
+        ${boton('clasificar-bandeja', '¿Qué es?', { id: b.id, etiqueta: `¿Qué es?: ${b.texto}` })}
         ${boton('descartar-bandeja', '×', { id: b.id, clase: 'chico plano', etiqueta: `Descartar: ${b.texto}` })}</span></li>`)
       .join('')}</ul>
   </section>`;
+}
+
+/** En la tarjeta verde: marcar lo pendiente sin bajar hasta el plan (en el teléfono queda a 2 pantallas). */
+function botonesPendiente(i) {
+  const nombre = nombreDe(i);
+  const verPlan = boton('ir-a', 'Ver mi plan', { id: 'plan', clase: 'boton-contorno', etiqueta: 'Ir a mi plan de hoy' });
+  if (i.tipo === 'planificar') return boton('ir-a', `${icono('play')} Ir a mi plan`, { id: 'plan', clase: 'boton-claro', etiqueta: 'Ir a mi plan de hoy' });
+  if (i.tipo === 'tarea' && i.tarea.tamano === 'simple') {
+    return `${boton('terminar-tarea', `${icono('play')} Hecha: registrar ${dur(i.minutos)}`, { id: i.tarea.id, clase: 'boton-claro', etiqueta: `Marcar hecha ahora: ${nombre}` })}${verPlan}`;
+  }
+  return `${boton('item-hecho', `${icono('play')} ${i.tipo === 'tiempo' ? 'Hecho' : 'Listo por hoy'}: registrar ${dur(i.minutos)}`, { id: i.id, clase: 'boton-claro', etiqueta: `Marcar listo ahora: ${nombre}` })}
+    ${boton('item-cantidad', 'Otra cantidad', { id: i.id, clase: 'boton-contorno', etiqueta: `Otra cantidad ahora: ${nombre}` })}${verPlan}`;
 }
 
 /** "Para: <meta>" — recordar para qué sirve lo que vas a hacer ayuda a empezar. */
@@ -509,8 +545,8 @@ function vistaHoy() {
     heroe = {
       paso: 2,
       titulo: tituloItem(pendiente),
-      texto: `${paraQue(pendiente.objetivo)}${esc(pendiente.proyecto.nombre)} · sesión de ${dur(pendiente.minutos)}. Ya está en tu plan de hoy: márcalo al terminar y anota cómo te fue.`,
-      botones: boton('ir-a', `${icono('play')} Ir a mi plan`, { id: 'plan', clase: 'boton-claro', etiqueta: 'Ir a mi plan de hoy' }),
+      texto: `${paraQue(pendiente.objetivo)}${esc(pendiente.proyecto.nombre)} · sesión de ${dur(pendiente.minutos)}. Ya está en tu plan de hoy: cuando termines, márcalo aquí mismo.`,
+      botones: botonesPendiente(pendiente),
     };
   } else if (principal) {
     heroe = {
@@ -556,6 +592,7 @@ function vistaHoy() {
     `<button type="button" class="stat" data-accion="${accion}" data-foco="${accion}:" aria-label="${esc(etiqueta)}"><span class="stat-icono">${icono(ic)}</span><span><span class="stat-num">${num}</span><span class="stat-texto">${texto}</span></span></button>`;
 
   const listaRecs = principal && !pendiente ? otras : recs;
+  const cicloHoy = datos.disponibilidad.excepciones[f] === undefined ? L.diaDelCiclo(datos.disponibilidad, f) : null;
   const momento = datos.meta.momento
     ? `<p class="momento">${icono('reloj')} Tu momento Rumbo: <strong>${esc(datos.meta.momento)}</strong> ${boton('momento', 'Cambiar', { clase: 'chico plano', etiqueta: 'Cambiar mi momento Rumbo' })}</p>`
     : `<p class="momento">${icono('reloj')} ¿Cuándo abrirás Rumbo cada día? ${boton('momento', 'Elegir mi momento Rumbo', { clase: 'chico plano' })}</p>`;
@@ -564,7 +601,7 @@ function vistaHoy() {
     <p class="ceja">Tu rumbo de hoy</p>
     <div class="cabecera-grande"><div><h1 class="titular">Un paso más cerca, cada día.</h1>
       <p class="bajada">${esc(fechaLarga(f))}. Qué hacer hoy, y por qué.</p>${L.nuevoComienzo(f, diasAusente) ? `<p class="nuevo-comienzo">${esc(L.nuevoComienzo(f, diasAusente))}</p>` : ''}${momento}</div>
-      <div class="fila-botones">${boton('anotar', `${icono('mas')} Anotar rápido`, { clase: 'primario', etiqueta: 'Anotar rápido' })}<a class="boton" href="#/dia/${L.sumarDias(f, -1)}">‹ Días anteriores</a></div></div>
+      <div class="fila-botones">${boton('anotar', `${icono('mas')} Anotar rápido`, { clase: 'primario', etiqueta: 'Anotar rápido' })}${boton('registrar-tiempo', `${icono('reloj')} Registrar tiempo`, { clase: '', etiqueta: 'Registrar tiempo' })}<a class="boton" href="#/dia/${L.sumarDias(f, -1)}">‹ Días anteriores</a></div></div>
     ${respaldo}
     ${regreso ? `<div class="aviso regreso" role="status"><p><strong>Qué bueno verte de vuelta.</strong> Pasaron ${diasAusente} días: no hay deuda que pagar. Arriba te dejo lo más corto para volver a arrancar.</p>${boton('cerrar-regreso', 'Gracias', { clase: 'chico' })}</div>` : ''}
     ${L.tocaRevisionSemanal(datos.meta, f) ? `<div class="aviso revision"><p><strong>Es ${L.diaSemana(f) === 0 ? 'domingo' : 'lunes'}: revisa tu semana.</strong> 5 minutos para ver lo logrado, decidir qué hacer con lo vencido y elegir tu foco.</p>${boton('revision', 'Revisar mi semana', { clase: 'chico primario' })}</div>` : ''}
@@ -584,7 +621,7 @@ function vistaHoy() {
           <div class="anillo-centro"><span class="anillo-num">${v.minutosHechos}</span><span class="anillo-meta">/ ${meta} min</span></div>
         </div>
         <p>${frase}</p>
-        <p class="ayuda">Tienes ${dur(v.libres)} libres; Rumbo planifica ${dur(v.capacidad)} (70%). ${boton('editar-libres', 'Cambiar', { clase: 'chico plano', etiqueta: 'Cambiar mis minutos libres' })}</p>
+        <p class="ayuda">${cicloHoy ? `Hoy es ${esc(nombreDiaCiclo(cicloHoy))}. ` : ''}Tienes ${dur(v.libres)} libres; Rumbo planifica ${dur(v.capacidad)} (70%). ${boton('editar-libres', 'Cambiar', { clase: 'chico plano', etiqueta: 'Cambiar mis minutos libres' })}</p>
       </section>
     </div>
     ${bandejaHtml()}
@@ -632,6 +669,7 @@ function vistaProyectos() {
     <p class="ceja">Tu centro de proyectos</p>
     <div class="cabecera-grande"><div><h1 class="titular">Proyectos</h1><p class="bajada">Principales arriba, secundarios abajo. Cada uno con su avance.</p></div>
       <div class="fila-botones">${boton('ver-plantillas', `${icono('chispa')} Ideas de proyectos`, { clase: 'grande-boton', etiqueta: 'Ideas de proyectos' })}${boton('nuevo-proyecto', `${icono('mas')} Nuevo proyecto`, { clase: 'primario grande-boton' })}</div></div>
+    <p class="ayuda">¿Dudas si algo es proyecto, objetivo o tarea? ${boton('clasificar', 'Averígualo con «¿Qué es esto?»', { clase: 'chico plano' })} · <a href="#/guia">Ver la guía</a></p>
     ${principales.length ? `<h2>Principales</h2>${grupo(principales)}` : ''}
     ${secundarios.length ? `<h2>Secundarios</h2>${grupo(secundarios)}` : ''}
     ${otros.length ? `<details class="bloque"><summary>Pausados y terminados (${otros.length})</summary>${grupo(otros)}</details>` : ''}
@@ -749,7 +787,7 @@ function objetivoHtml(o) {
     const hechas = tareas.filter((t) => t.hecha);
     detalle = `${prog.hechas} de ${plural(prog.total, 'tarea hecha', 'tareas hechas')}${o.logrado ? ' · marcado como logrado' : ''}`;
     if (o.logrado || (tareas.length && !pendientes.length)) {
-      logro = `<div class="logro"><p><strong>${o.logrado ? '¡Objetivo logrado!' : 'Terminaste todas sus tareas.'}</strong> ¿Quieres ir más profundo en este tema? La siguiente etapa parte desde lo que ya lograste.</p>
+      logro = `<div class="logro"><p><strong>${o.logrado ? '¡Objetivo logrado!' : 'Terminaste todas sus tareas.'}</strong> ¿Quieres ir más profundo en este tema? La siguiente etapa parte desde lo que ya lograste.${o.logrado ? ' Si aún falta algo, agrega una tarea y vuelve a estar en curso.' : ''}</p>
         <div class="fila-botones">${boton('ampliar', 'Ampliar objetivo', { id: o.id, clase: 'chico primario', etiqueta: `Ampliar objetivo: ${o.nombre}` })}${o.logrado ? '' : boton('logrado', 'Marcar logrado', { id: o.id })}</div></div>`;
     }
     cuerpo = `
@@ -819,7 +857,7 @@ function vistaAjustes() {
     <div class="cabecera-grande"><div><h1 class="titular">Ajustes</h1><p class="bajada">Tu tiempo, tus respaldos y cómo decide Rumbo.</p></div></div>
     <section class="tarjeta seccion">
       <h2>Mis minutos libres por día</h2>
-      <p class="ayuda">Tu semana normal: el tiempo que de verdad tienes para tus proyectos (fuera de turnos y obligaciones). Rumbo recomienda hasta el 70% de ese tiempo.</p>
+      ${disp.ciclo ? cicloHtml(disp) : `<p class="ayuda">Tu semana normal: el tiempo que de verdad tienes para tus proyectos (fuera de turnos y obligaciones). Rumbo recomienda hasta el 70% de ese tiempo.</p>
       <form data-form="disponibilidad">
         <div class="dias">
           ${ORDEN_DIAS.map((d) => `<div class="campo"><label for="dia-${d}">${NOMBRES_DIA[d]}</label><input id="dia-${d}" name="d${d}" type="number" inputmode="numeric" min="0" max="1440" step="5" value="${disp.plantilla[d]}" required></div>`).join('')}
@@ -827,6 +865,9 @@ function vistaAjustes() {
         <p class="error" data-error hidden></p>
         <button class="primario" type="submit">Guardar minutos</button>
       </form>
+      <h3 class="subtitulo">¿Trabajas por turnos?</h3>
+      <p class="ayuda">Si tus turnos rotan (por ejemplo, 4º turno: largo, noche, saliente y libre), una semana fija no calza. Define tu ciclo una vez y Rumbo sabrá cuánto tiempo tienes cada día, sin marcar días especiales a mano.</p>
+      ${boton('editar-ciclo', 'Configurar mi ciclo de turnos')}`}
       <h3 class="subtitulo">Días especiales</h3>
       ${especiales.length ? `<ul class="especiales">${especiales.map(([f, m]) => `<li><span>${esc(etiquetaDia(f))}: ${dur(m)} libres</span>${boton('quitar-excepcion', 'Quitar', { id: f, clase: 'chico plano', etiqueta: `Quitar día especial: ${etiquetaDia(f)}` })}</li>`).join('')}</ul>` : '<p class="ayuda">Ninguno. Úsalos para turnos: marca con anticipación cuánto tiempo tendrás.</p>'}
       ${boton('editar-libres', 'Marcar un día especial')}
@@ -855,14 +896,16 @@ function vistaAjustes() {
     <section class="tarjeta seccion">
       <details class="bloque"><summary>Cómo decide Rumbo</summary>
       <ul class="ayuda lista-ayuda">
-        <li><strong>Orden:</strong> dentro de un objetivo, se recomiendan solo las 2 primeras tareas pendientes, en su orden (cámbialo con "Más ⋯ → ↑ Antes / ↓ Después"). Una tarea posterior entra antes solo si tiene su propio plazo cercano.</li>
+        <li><strong>Orden:</strong> dentro de un objetivo, se recomiendan solo las 2 primeras tareas pendientes, en su orden (cámbialo con "Más ⋯ → ↑ Antes / ↓ Después"); en empate va primero la anterior. En objetivos de 3 o más tareas, la última (suele ser «Enviar» o «Entregar») espera a que las demás estén hechas. Una tarea posterior entra antes solo si tiene su propio plazo cercano.</li>
+        <li><strong>Objetivo logrado:</strong> al terminar su última tarea queda logrado solo (y se celebra). Si agregas o reabres una tarea, vuelve a estar en curso.</li>
         <li><strong>Motivación:</strong> al avanzar ves cuánto subió el proyecto y, al lograr un objetivo, una celebración (principio del progreso, Amabile y Kramer). Cerca de la meta (75% o más, o la última tarea), la tarea sube con "Te falta poco" (gradiente de meta, Kivetz y otros, 2006). La tarjeta verde recuerda para qué es ("Para: …"), y los lunes y el día 1 de cada mes hay mensaje de nuevo comienzo (Dai, Milkman y Riis, 2014). Sin puntos, medallas ni rachas que castiguen.</li>
         <li><strong>Foco de la semana:</strong> los objetivos que eliges en la revisión semanal suben en las recomendaciones esa semana.</li>
         <li><strong>Barra de una tarea:</strong> pasos hechos / pasos totales. Sin pasos, una tarea media o amplia avanza con el tiempo que registras, hasta 90% (el 100% llega al terminarla); una simple está en 0% o 100%.</li>
         <li><strong>Barra de un objetivo de resultado:</strong> sus tareas ponderadas por tamaño (simple 1, media 3, amplia 8), según el avance de cada una.</li>
         <li><strong>Barra de un objetivo de tiempo:</strong> minutos registrados / meta. Los semanales (lunes a domingo) se muestran como <em>ritmo semanal</em>.</li>
         <li><strong>Barra del proyecto:</strong> el promedio de sus objetivos, sin los ritmos semanales (vuelven a cero cada lunes y harían caer el proyecto).</li>
-        <li><strong>Recomendaciones:</strong> suman puntos por plazo cercano o vencido, objetivos de tiempo atrasados en la semana, proyecto principal, días sin avanzar en el proyecto, días sin tocar la tarea (para que ninguna quede olvidada) y tareas ya empezadas. Si un objetivo no tiene tareas pendientes, te propone planificarlo. Máximo 3, hasta 2 por objetivo, que quepan en tu tiempo; aparte, un proyecto secundario con 7 días o más sin avance aparece en "Si te sobra tiempo". Son reglas prácticas, no ciencia.</li>
+        <li><strong>Recomendaciones:</strong> suman puntos por plazo cercano o vencido, objetivos de tiempo atrasados en la semana (con más fuerza al acercarse el domingo, para que tu ritmo semanal no quede en cero), proyecto principal, días sin avanzar en el proyecto, días sin tocar la tarea (para que ninguna quede olvidada) y tareas ya empezadas. Si un objetivo no tiene tareas pendientes, te propone planificarlo. Máximo 3, hasta 2 por objetivo, que quepan en tu tiempo; aparte, un proyecto secundario con 7 días o más sin avance aparece en "Si te sobra tiempo". Son reglas prácticas, no ciencia.</li>
+        <li><strong>Minutos libres:</strong> salen de tu semana fija o de tu ciclo de turnos (por ejemplo, 4º turno), y un día especial siempre manda.</li>
         <li><strong>Margen del 70%:</strong> por la <em>falacia de planificación</em> (Kahneman y Tversky, 1979; Buehler, Griffin y Ross, 1994), solemos subestimar cuánto demoramos. El sesgo tiene respaldo de investigación; el 70% es una regla práctica.</li>
         <li><strong>Etapas:</strong> cuando logras un objetivo puedes ampliarlo. La etapa lograda queda guardada dentro de la nueva, sigue contando al 100% en el avance del proyecto y Claude la recibe como contexto para proponerte algo más profundo.</li>
         <li><strong>Notas e historial:</strong> cada día guarda su plan. En "Días anteriores" ves lo que planificaste, hiciste y anotaste. Una nota marcada "falta algo" queda pendiente y sube esa tarea en las recomendaciones hasta que la marques resuelta.</li>
@@ -884,6 +927,491 @@ function vistaAjustes() {
       <p class="ayuda">Agrega un proyecto de muestra para ver cómo funciona todo. Bórralo cuando quieras desde su página.</p>
       ${boton('cargar-ejemplo', 'Agregar proyecto de ejemplo')}
     </section>`;
+}
+
+// ---------- Ciclo de turnos ----------
+
+/** Nombre de un día del ciclo: "Saliente (día 3 de 4)" o "día 3 de 4 de tu ciclo". */
+const nombreDiaCiclo = (c) => (c.nombre ? `${c.nombre} (día ${c.numero} de ${c.total})` : `día ${c.numero} de ${c.total} de tu ciclo`);
+
+/** Ajustes con ciclo activo: los próximos 7 días según el ciclo, para comprobar que calza con tus turnos. */
+function cicloHtml(disp) {
+  const f = hoy();
+  const dias = Array.from({ length: 7 }, (_, k) => {
+    const dia = L.sumarDias(f, k);
+    const c = L.diaDelCiclo(disp, dia);
+    const especial = disp.excepciones[dia] !== undefined;
+    return `<li><span>${esc(etiquetaDia(dia))}: <strong>${esc(c.nombre || `día ${c.numero}`)}</strong></span><span>${dur(L.minutosLibres(disp, dia))}${especial ? ' · día especial' : ''}</span></li>`;
+  }).join('');
+  return `<p class="ayuda">Usas un <strong>ciclo de turnos de ${disp.ciclo.minutos.length} días</strong>. Rumbo recomienda hasta el 70% del tiempo libre de cada día. Tu semana fija queda guardada y vuelve si quitas el ciclo.</p>
+    <ul class="especiales ciclo-proximos" aria-label="Tus próximos 7 días">${dias}</ul>
+    <div class="fila-botones">${boton('editar-ciclo', 'Editar mi ciclo', { clase: 'primario' })}${boton('quitar-ciclo', 'Volver a semana fija')}</div>`;
+}
+
+function dialogoCiclo() {
+  const actual = datos.disponibilidad.ciclo;
+  let filas = actual
+    ? actual.minutos.map((m, i) => ({ nombre: actual.nombres[i], minutos: m }))
+    : L.CICLO_CUARTO_TURNO.minutos.map((m, i) => ({ nombre: L.CICLO_CUARTO_TURNO.nombres[i], minutos: m }));
+  let diaHoy = actual ? L.diaDelCiclo(datos.disponibilidad, hoy()).numero : 1;
+  const form = abrirDialogo(
+    'Mi ciclo de turnos',
+    `<p class="ayuda">Escribe los días de tu ciclo en orden y cuánto tiempo libre real te queda en cada uno (fuera del turno, traslados y descanso). Parte con el 4º turno; ajústalo a tu realidad.</p>
+     <div class="campo"><label for="ciclo-largo">¿Cuántos días dura tu ciclo?</label><select id="ciclo-largo">${Array.from({ length: L.CICLO_MAX - L.CICLO_MIN + 1 }, (_, k) => k + L.CICLO_MIN).map((k) => `<option value="${k}">${k} días</option>`).join('')}</select></div>
+     <div data-filas></div>
+     <div class="campo"><label for="ciclo-hoy">¿Qué día de tu ciclo es hoy?</label><select id="ciclo-hoy" name="hoy"></select></div>`,
+    (fd) => {
+      const nombres = filas.map((_, i) => String(fd.get(`n${i}`) ?? '').trim().slice(0, 30));
+      const minutos = filas.map((_, i) => Number(fd.get(`m${i}`)));
+      if (!minutos.every((m) => Number.isInteger(m) && m >= 0 && m <= 1440)) return 'Cada día debe tener minutos enteros de 0 a 1440.';
+      const n = Number(fd.get('hoy'));
+      const ciclo = { inicio: L.sumarDias(hoy(), -(n - 1)), nombres, minutos };
+      marcarLibresTutorial();
+      cambiar((d) => (d.disponibilidad.ciclo = ciclo), `Ciclo guardado. Hoy es ${nombres[n - 1] || `el día ${n}`}: ${dur(minutos[n - 1])} libres.`);
+    },
+    'Guardar ciclo',
+  );
+  const $largo = form.querySelector('#ciclo-largo');
+  const $hoy = form.querySelector('#ciclo-hoy');
+  const pintar = () => {
+    $largo.value = String(filas.length);
+    form.querySelector('[data-filas]').innerHTML = filas
+      .map((f, i) => `<fieldset class="fila-ciclo"><legend>Día ${i + 1}</legend>
+        <div class="campo"><label for="ciclo-n${i}">Turno</label><input id="ciclo-n${i}" name="n${i}" maxlength="30" value="${esc(f.nombre)}" placeholder="Libre" aria-label="Día ${i + 1}: turno"></div>
+        <div class="campo"><label for="ciclo-m${i}">Minutos libres</label><input id="ciclo-m${i}" name="m${i}" type="number" inputmode="numeric" min="0" max="1440" step="5" required value="${f.minutos}" aria-label="Día ${i + 1}: minutos libres"></div>
+      </fieldset>`)
+      .join('');
+    diaHoy = Math.min(diaHoy, filas.length);
+    $hoy.innerHTML = filas.map((f, i) => `<option value="${i + 1}"${i + 1 === diaHoy ? ' selected' : ''}>Día ${i + 1}${f.nombre ? ` · ${esc(f.nombre)}` : ''}</option>`).join('');
+  };
+  // Lee lo escrito antes de redibujar, para no perderlo al cambiar el largo del ciclo.
+  const leer = () => {
+    filas = filas.map((f, i) => ({ nombre: form.querySelector(`#ciclo-n${i}`)?.value ?? f.nombre, minutos: Number(form.querySelector(`#ciclo-m${i}`)?.value ?? f.minutos) }));
+    diaHoy = Number($hoy.value) || diaHoy;
+  };
+  $largo.addEventListener('change', () => {
+    leer();
+    const k = Number($largo.value);
+    filas = Array.from({ length: k }, (_, i) => filas[i] ?? { nombre: '', minutos: 120 });
+    pintar();
+  });
+  form.addEventListener('input', (e) => {
+    if (/^n\d+$/.test(e.target.name ?? '')) {
+      leer();
+      const i = Number(e.target.name.slice(1));
+      $hoy.options[i].textContent = `Día ${i + 1}${filas[i].nombre ? ` · ${filas[i].nombre}` : ''}`;
+    }
+  });
+  pintar();
+  $largo.focus();
+}
+
+// ---------- Registrar tiempo (sin pasar por el plan) ----------
+
+/** <select> con lo que acepta minutos: objetivos de tiempo y tareas pendientes, por proyecto activo. */
+function opcionesRegistro(seleccion = '') {
+  return L.ordenarProyectos(datos, hoy())
+    .filter((p) => p.estado === 'activo')
+    .map((p) => {
+      const opciones = [];
+      for (const o of L.objetivosVisibles(datos, p.id)) {
+        if (o.tipo === 'tiempo') opciones.push([`o:${o.id}`, `${o.nombre} (tiempo)`]);
+        else if (!o.logrado) for (const t of L.tareasDe(datos, o.id).filter((x) => !x.hecha)) opciones.push([`t:${t.id}`, t.titulo]);
+      }
+      return opciones.length
+        ? `<optgroup label="${esc(p.nombre)}">${opciones.map(([v, n]) => `<option value="${esc(v)}"${v === seleccion ? ' selected' : ''}>${esc(n)}</option>`).join('')}</optgroup>`
+        : '';
+    })
+    .join('');
+}
+
+/**
+ * Registrar minutos de algo que hiciste fuera del plan (por ejemplo, una sesión en Lumen: solo el total).
+ * Si eso mismo está pendiente en tu plan de hoy, lo marca hecho en vez de contarlo dos veces.
+ */
+function dialogoRegistrar() {
+  let ultimo = '';
+  try {
+    ultimo = sessionStorage.getItem('rumbo.ultimoRegistro') ?? '';
+  } catch {
+    // sin almacenamiento de sesión
+  }
+  const opciones = opcionesRegistro(ultimo);
+  if (!opciones) return avisar('Primero crea un objetivo o una tarea en tus proyectos.');
+  const f = hoy();
+  abrirDialogo(
+    'Registrar tiempo',
+    `<p class="ayuda">Para lo que hiciste sin pasar por tu plan. ¿Estudiaste en Lumen? Escribe solo el total de la sesión: el detalle queda allá.</p>
+     <div class="campo"><label for="r-destino">¿En qué trabajaste?</label><select id="r-destino" name="destino" required>${opciones}</select></div>
+     <div class="campos">
+       <div class="campo"><label for="r-minutos">Minutos</label><input id="r-minutos" name="minutos" type="number" inputmode="numeric" min="1" max="1440" step="5" required value="30"></div>
+       <div class="campo"><label for="r-fecha">Día</label><input id="r-fecha" name="fecha" type="date" max="${f}" value="${f}" required></div>
+     </div>`,
+    (fd) => {
+      const destino = String(fd.get('destino') ?? '');
+      const [tipo, id] = destino.split(':');
+      const t = tipo === 't' ? buscar(datos.tareas, id) : null;
+      const o = buscar(datos.objetivos, t ? t.objetivoId : id);
+      if (!o) return 'Elige en qué trabajaste.';
+      const m = Number(fd.get('minutos'));
+      if (!Number.isInteger(m) || m < 1 || m > 1440) return 'Escribe minutos enteros, de 1 a 1440.';
+      const fecha = String(fd.get('fecha') ?? '');
+      if (!L.esFechaValida(fecha) || fecha > hoy()) return 'Elige hoy o un día anterior.';
+      try {
+        sessionStorage.setItem('rumbo.ultimoRegistro', destino);
+      } catch {
+        // no pasa nada si no se puede recordar
+      }
+      const item = fecha === hoy()
+        ? L.planDeHoy(datos, fecha).items.find((i) => !i.hecho && (t ? i.tareaId === t.id : i.tipo === 'tiempo' && i.objetivoId === o.id))
+        : null;
+      const nombre = t ? t.titulo : o.nombre;
+      cambiar((d) => {
+        if (item) completarItem(d, item.id, m);
+        else {
+          d.registros.push({ id: crearId(), fecha, minutos: m, objetivoId: o.id, tareaId: t?.id ?? null });
+          const tt = t && buscar(d.tareas, t.id);
+          if (tt && (!tt.tocado || tt.tocado < fecha)) tt.tocado = fecha;
+        }
+      }, `Registraste ${dur(m)} en "${nombre}"${fecha !== hoy() ? ` (${fechaCorta(fecha)})` : ''}${item ? ' y quedó hecho en tu plan' : ''}.`, { celebrar: o.proyectoId });
+    },
+    'Registrar',
+  );
+}
+
+// ---------- GUÍA ----------
+
+/** Cómo ordenar tus cosas: las piezas, las preguntas para decidir, principal o secundario, y Rumbo con Lumen. */
+function vistaGuia() {
+  const pieza = (nombre, que, reconoce, ejemplo) =>
+    `<li class="pieza"><h3>${nombre}</h3><p>${que}</p><p class="ayuda"><strong>Se reconoce:</strong> ${reconoce}</p><p class="ayuda"><strong>Ejemplo:</strong> ${ejemplo}</p></li>`;
+  return `
+    <p class="ceja">Aprende a usar Rumbo</p>
+    <div class="cabecera-grande"><div><h1 class="titular">Guía</h1><p class="bajada">Cómo ordenar tus cosas sin mezclarlas.</p></div>
+      <div class="fila-botones">${boton('clasificar', `${icono('chispa')} ¿Qué es esto?`, { clase: 'primario grande-boton', etiqueta: '¿Qué es esto?' })}${boton('tutorial-empezar', `${icono('play')} Hacer el tutorial`, { clase: 'grande-boton', etiqueta: 'Hacer el tutorial' })}</div></div>
+
+    <section class="tarjeta seccion">
+      <h2>Las 4 piezas, de lo grande a lo chico</h2>
+      <ul class="piezas">
+        ${pieza('Proyecto', 'Algo grande que te toma semanas o meses.', 'necesita varias tareas distintas y varias sesiones.', '«Postular a la UCI», «Dito Labs: primer cliente».')}
+        ${pieza('Objetivo', 'Lo que quieres lograr dentro del proyecto.', 'al final puedes decir «sí, se logró». O es constancia: «3 h por semana».', '«Enviar la postulación antes del 15 de noviembre».')}
+        ${pieza('Tarea', 'Una acción concreta para llegar al objetivo.', 'empieza con verbo y se hace en una o pocas sentadas.', '«Actualizar el CV», «Pedir la carta de recomendación».')}
+        ${pieza('Paso', 'Las partes de una tarea mediana o grande.', 'cada uno que marcas mueve la barra de la tarea.', '«Ordenar experiencia», «Revisar ortografía».')}
+      </ul>
+      <p class="ayuda">Y <strong>Por ordenar</strong>: lo que se te ocurre y aún no sabes dónde va. Lo anotas con «Anotar rápido» en Mi día y lo decides después.</p>
+    </section>
+
+    <section class="tarjeta seccion">
+      <h2>Las preguntas para decidir</h2>
+      <p>Pasa cada cosa por estas preguntas, en orden. «¿Qué es esto?» te las hace una por una.</p>
+      <ol class="lista-ayuda">
+        <li><strong>¿Se hace en menos de 15 minutos?</strong> Si es parte de un proyecto, es una <em>tarea simple</em>. Si no, <em>no va en Rumbo</em>: hazla ahora o déjala en los recordatorios del teléfono.</li>
+        <li><strong>¿Se hace en una o pocas sentadas?</strong> Es una <em>tarea</em> dentro de un objetivo.</li>
+        <li><strong>¿Es constancia sin fin, como estudiar o entrenar?</strong> Es un <em>objetivo de tiempo</em> («Dedicarle tiempo»).</li>
+        <li><strong>¿Tiene final y necesita 3 o más acciones durante semanas?</strong> Es un <em>proyecto</em>. Si tiene final pero es un solo resultado, es un <em>objetivo</em>.</li>
+      </ol>
+    </section>
+
+    <section class="tarjeta seccion">
+      <h2>Principal, secundario o en pausa</h2>
+      <ul class="lista-ayuda">
+        <li><strong>Principal:</strong> si este mes no avanza, te va a pesar. Suele tener plazo o un impacto grande. Máximo 3, mejor 2.</li>
+        <li><strong>Secundario:</strong> lo quieres avanzar, pero puede esperar una semana. Rumbo te lo propone cuando te sobra tiempo.</li>
+        <li><strong>En pausa:</strong> para «algún día». Créalo y pausalo: sale de tu cabeza sin pedirte tiempo.</li>
+      </ul>
+      <p class="ayuda">Si dudas: «Si este mes solo pudiera avanzar 2 cosas, ¿estaría esta?». Si no es un sí inmediato, es secundario.</p>
+    </section>
+
+    <section class="tarjeta seccion">
+      <h2>Cómo cargarlo para no rendirte</h2>
+      <ol class="lista-ayuda">
+        <li><strong>Vacía la cabeza (10 min):</strong> escribe todo lo pendiente, sin ordenar. Puedes usar «Anotar rápido».</li>
+        <li><strong>Clasifica</strong> cada cosa con «¿Qué es esto?».</li>
+        <li><strong>Elige 2 principales</strong> y como mucho 2 secundarios. El resto, en pausa o en Por ordenar.</li>
+        <li><strong>Por proyecto, 1 objetivo y 3 a 5 tareas.</strong> Cuando se acaben, Rumbo te pide planificar las siguientes.</li>
+        <li><strong>La primera semana, usa solo Mi día:</strong> aceptar, hacer y marcar. Ajustas en la revisión semanal.</li>
+      </ol>
+      <p class="ayuda">Cargar 12 proyectos con 40 tareas el primer día es la forma más rápida de abandonar. Con poco cargado, Mi día te muestra 1 a 3 cosas, y así está pensado. <em>(Práctica común de organización.)</em></p>
+    </section>
+
+    <section class="tarjeta seccion">
+      <h2>Si estudias con Lumen</h2>
+      <p>Rumbo no se conecta con Lumen: no lee ni sincroniza sus datos. Tú pasas un solo dato, a mano.</p>
+      <ul class="lista-ayuda">
+        <li><strong>En Rumbo:</strong> el proyecto, el objetivo y la tarea de estudio («Estudiar la guía clínica»), sin pasos por capítulo.</li>
+        <li><strong>En Lumen:</strong> el material, las páginas o lecciones, el temporizador, cómo te fue, las preguntas y los repasos.</li>
+        <li><strong>Al terminar:</strong> en Mi día toca «Registrar tiempo» (u «Otra cantidad», si lo tenías en tu plan) y escribe solo el total de minutos de la sesión.</li>
+        <li><strong>Notas en Rumbo:</strong> solo lo que cambia el plan o crea una tarea («Repasar el capítulo 4 antes del ensayo»).</li>
+        <li><strong>Lo que estudias por gusto</strong> queda solo en Lumen.</li>
+      </ul>
+    </section>`;
+}
+
+// ---------- Tutorial (cuadro por cuadro, con seguimiento en vivo) ----------
+// Los cuadros de acción se cumplen con tus datos reales: al hacerlo en la app, el tutorial avanza solo.
+// Su estado es de este equipo (localStorage), como el modo día/noche.
+
+const CLAVE_TUTORIAL = 'rumbo.tutorial';
+const primerProyecto = () => (datos.proyectos[0] ? `#/proyecto/${encodeURIComponent(datos.proyectos[0].id)}` : '#/proyectos');
+const CUADROS = [
+  { titulo: 'Así se ordena Rumbo', texto: 'Todo se arma en 4 piezas, de lo grande a lo chico: <strong>Proyecto → Objetivo → Tarea → Paso</strong>. Cada una con su barra de avance. Te guío paso a paso, y avanzo solo cuando lo hagas en la app.' },
+  { titulo: '¿Proyecto, objetivo o tarea?', texto: '<strong>Proyecto:</strong> semanas o meses, varias acciones. <strong>Objetivo:</strong> un resultado que podrás decir «logrado». <strong>Tarea:</strong> una acción con verbo, en una o pocas sentadas. Si dudas, «¿Qué es esto?» te pregunta.', extra: ['clasificar', '¿Qué es esto?'] },
+  { titulo: 'Principal o secundario', texto: '<strong>Principal:</strong> si este mes no avanza, te pesa. Máximo 2 o 3. <strong>Secundario:</strong> puede esperar una semana. Lo de «algún día», en pausa.' },
+  { titulo: 'Crea tu primer proyecto', texto: 'Uno solo: el más importante. Los demás los agregas después.', listo: (a) => a.proyecto, ruta: () => '#/proyectos', foco: '[data-accion="nuevo-proyecto"]' },
+  { titulo: 'Ponle un objetivo concreto', texto: 'Completa «¿Cómo sabrás que lo lograste?». Si es constancia, como estudiar, elige «Dedicarle tiempo».', listo: (a) => a.objetivo, ruta: primerProyecto, foco: '[data-accion="nuevo-objetivo"]' },
+  {
+    titulo: 'Agrega sus primeras tareas', texto: 'De 3 a 5, cada una con verbo: «Actualizar el CV». No necesitas todo el camino hoy.',
+    listo: (a) => a.tareas >= 3 || a.tiempo, basta: (a) => a.tareas >= 1, cuenta: (a) => (a.tiempo ? '' : `Llevas ${Math.min(a.tareas, 3)} de 3.`),
+    ruta: primerProyecto, foco: '[data-accion="nueva-tarea"]',
+  },
+  { titulo: 'Dile cuánto tiempo tienes', texto: 'Tus minutos libres reales de cada día, fuera de turnos. Si tus turnos rotan, configura tu ciclo. Rumbo planifica solo el 70%, porque todo toma más de lo que creemos.', listo: (a) => a.libres, ruta: () => '#/ajustes', foco: 'form[data-form="disponibilidad"] button[type=submit]', extra: ['tutorial-libres-ok', 'Mis minutos están bien'] },
+  { titulo: 'Acepta tu primera recomendación', texto: 'En Mi día, la tarjeta verde te dice qué hacer y por qué. Toca «Aceptar».', listo: (a) => a.aceptada, ruta: () => '#/hoy', foco: 'section.heroe [data-accion="aceptar"], section.heroe [data-accion="ver-igual"], section.heroe [data-accion="ir-a"]' },
+  { titulo: 'Hazla y márcala', texto: 'Cuando la termines, márcala en «Mi plan de hoy». Verás cuánto subió tu proyecto. Puedes ocultar el tutorial y hacerla con calma: te espero.', listo: (a) => a.registrada, ruta: () => '#/hoy', foco: 'section.heroe [data-accion="item-hecho"], section.heroe [data-accion="terminar-tarea"], li.item [data-accion="item-hecho"], li.item [data-accion="terminar-tarea"]' },
+  { titulo: 'Listo: ya sabes usar Rumbo', texto: 'Tu rutina: abre Mi día, acepta, haz y marca. El domingo, revisa tu semana. Para cargar lo demás, usa la Guía y «¿Qué es esto?».', fin: true },
+];
+
+function leerTutorial() {
+  try {
+    const t = JSON.parse(localStorage.getItem(CLAVE_TUTORIAL));
+    if (t && Number.isInteger(t.cuadro) && ['activo', 'minimizado', 'cerrado', 'terminado'].includes(t.estado)) {
+      return { ...t, cuadro: Math.min(Math.max(0, t.cuadro), CUADROS.length - 1), libres: !!t.libres };
+    }
+  } catch {
+    // sin almacenamiento o dato dañado: se decide de nuevo
+  }
+  return null;
+}
+
+// Primera vez (sin proyectos): parte solo. Si ya usabas Rumbo, queda en la Guía para cuando quieras.
+let tutorial = leerTutorial() ?? { estado: datos.proyectos.length ? 'cerrado' : 'activo', cuadro: 0, libres: false };
+let avancePrevio = null; // para avanzar solo cuando cambian tus datos (no al volver a un cuadro ya hecho)
+let cumplido = null; // título del cuadro recién cumplido, para celebrarlo en el panel
+let mostrarAlPintar = false;
+
+function guardarTutorial(cambios = {}) {
+  tutorial = { ...tutorial, ...cambios };
+  try {
+    localStorage.setItem(CLAVE_TUTORIAL, JSON.stringify(tutorial));
+  } catch {
+    // sin almacenamiento: vale mientras la página esté abierta
+  }
+}
+if (tutorial.estado === 'activo') guardarTutorial();
+
+const avanceActual = () => L.avanceTutorial(datos, { libres: tutorial.libres });
+const enCurso = () => tutorial.estado === 'activo' || tutorial.estado === 'minimizado';
+
+function marcarLibresTutorial() {
+  if (!tutorial.libres) guardarTutorial({ libres: true });
+}
+
+/** Seguimiento en vivo: si lo que pide el cuadro actual ya está hecho en tus datos, pasa al siguiente pendiente. */
+function seguirTutorial() {
+  if (!enCurso()) return;
+  const a = avanceActual();
+  const clave = JSON.stringify(a);
+  if (clave === avancePrevio) return;
+  avancePrevio = clave;
+  // Desde el cuadro actual, el primer cuadro de acción que falta (si te adelantaste, salta hasta ahí).
+  const actual = tutorial.cuadro;
+  let i = CUADROS.findIndex((c, k) => k >= actual && c.listo && !c.listo(a));
+  if (i === -1) i = CUADROS.length - 1;
+  const hechos = CUADROS.slice(actual, i).filter((c) => c.listo?.(a));
+  if (i > actual && hechos.length) {
+    cumplido = hechos.at(-1).titulo;
+    guardarTutorial({ cuadro: i });
+  }
+}
+
+/** Ir a un cuadro; hacia adelante salta los de acción que ya hiciste. */
+function irACuadro(i, { saltarHechos = false } = {}) {
+  const a = avanceActual();
+  let j = Math.min(Math.max(0, i), CUADROS.length - 1);
+  if (saltarHechos) while (CUADROS[j]?.listo?.(a)) j++;
+  cumplido = null;
+  guardarTutorial({ cuadro: j, estado: 'activo' });
+  pintarTutorial();
+}
+
+function pintarTutorial() {
+  const $t = document.getElementById('tutorial');
+  if (!$t) return;
+  for (const el of document.querySelectorAll('.tutorial-foco')) el.classList.remove('tutorial-foco');
+  document.body.classList.toggle('con-tutorial', tutorial.estado === 'activo');
+  if (!enCurso()) {
+    $t.innerHTML = '';
+    return;
+  }
+  const i = tutorial.cuadro;
+  const c = CUADROS[i];
+  const a = avanceActual();
+  if (tutorial.estado === 'minimizado') {
+    $t.innerHTML = `<button type="button" class="tutorial-pastilla" data-accion="tutorial-abrir">${icono('chispa')} Tutorial · ${i + 1} de ${CUADROS.length}</button>`;
+    return;
+  }
+  const hecho = c.listo?.(a);
+  const accion = !!c.listo;
+  let estado = '';
+  if (accion) {
+    estado = hecho
+      ? '<p class="tutorial-estado hecho">✓ Hecho</p>'
+      : `<p class="tutorial-estado"><span class="tutorial-espera" aria-hidden="true"></span> Te espero: hazlo en la app. ${c.cuenta ? esc(c.cuenta(a)) : ''}</p>`;
+  }
+  let siguiente;
+  if (c.fin) siguiente = boton('tutorial-terminar', 'Terminar', { clase: 'chico primario' });
+  else if (accion && !hecho && !c.basta?.(a)) siguiente = boton('tutorial-siguiente', 'Saltar este paso', { clase: 'chico plano' });
+  else siguiente = boton('tutorial-siguiente', 'Siguiente ›', { clase: 'chico primario' });
+  $t.innerHTML = `<aside class="tutorial" aria-labelledby="tutorial-titulo">
+    <div class="tutorial-cabeza"><span class="tutorial-ceja">Tutorial · ${i + 1} de ${CUADROS.length}</span>
+      <span>${c.fin ? '' : boton('tutorial-salir', 'Salir', { clase: 'chico plano', etiqueta: 'Salir del tutorial' })}${boton('tutorial-ocultar', 'Ocultar', { clase: 'chico plano', etiqueta: 'Ocultar el tutorial' })}</span></div>
+    <ol class="tutorial-puntos" aria-hidden="true">${CUADROS.map((x, k) => `<li class="${k < i ? 'pasado' : k === i ? 'actual' : ''}"></li>`).join('')}</ol>
+    <div role="status" aria-live="polite">${cumplido ? `<p class="tutorial-logro">✓ ${esc(cumplido)}: listo.</p>` : ''}</div>
+    <h2 id="tutorial-titulo">${esc(c.titulo)}</h2>
+    <p class="tutorial-texto">${c.texto}</p>
+    ${estado}
+    <div class="fila-botones">
+      ${i > 0 ? boton('tutorial-anterior', '‹ Anterior', { clase: 'chico plano' }) : ''}
+      ${accion && !hecho ? boton('tutorial-mostrar', 'Muéstrame dónde', { clase: 'chico' }) : ''}
+      ${c.extra && !(accion && hecho) ? boton(c.extra[0], c.extra[1], { clase: 'chico' }) : ''}
+      ${c.fin ? '<a class="boton chico" href="#/guia">Ver la guía</a>' : ''}
+      ${siguiente}
+    </div>
+  </aside>`;
+  if (accion && !hecho) {
+    const objetivo = document.querySelector(c.foco);
+    objetivo?.classList.add('tutorial-foco');
+    if (mostrarAlPintar && objetivo) {
+      // Arriba de la pantalla, para que el panel (abajo en el teléfono) no lo tape.
+      window.scrollBy({ top: objetivo.getBoundingClientRect().top - 110, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+      objetivo.focus({ preventScroll: true });
+    }
+  }
+  mostrarAlPintar = false;
+}
+
+/** Lleva a la pantalla del cuadro y resalta dónde tocar. */
+function mostrarDondeTutorial() {
+  const c = CUADROS[tutorial.cuadro];
+  const ruta = c.ruta?.();
+  mostrarAlPintar = true;
+  if (ruta && location.hash !== ruta) location.hash = ruta; // al redibujar, pintarTutorial lo muestra
+  else pintarTutorial();
+}
+
+// ---------- ¿Qué es esto? (clasificar algo, pregunta por pregunta) ----------
+
+let clasif = null; // { texto, respuestas: [], bandejaId }
+
+function dialogoClasificar(texto = '', bandejaId = null) {
+  clasif = { texto, respuestas: [], bandejaId };
+  if (texto) return pintarClasificar();
+  abrirDialogo(
+    '¿Qué es esto?',
+    `<p class="ayuda">Te hago unas preguntas de sí o no y te digo si es proyecto, objetivo, tarea o algo que no va en Rumbo.</p>
+     <div class="campo"><label for="c-texto">¿Qué quieres ordenar?</label><input id="c-texto" name="texto" maxlength="300" required autocomplete="off" placeholder="Postular a la UCI"></div>`,
+    (fd) => {
+      const t = String(fd.get('texto') ?? '').trim();
+      if (!t) return 'Escribe qué quieres ordenar.';
+      clasif.texto = t.slice(0, 300);
+      pintarClasificar();
+      return false;
+    },
+    'Empezar',
+  );
+}
+
+function pintarClasificar() {
+  const paso = L.pasoClasificar(clasif.respuestas);
+  const cosa = `<p class="clasif-cosa">«${esc(clasif.texto)}»</p>`;
+  let cuerpo;
+  if (paso.tipo === 'pregunta') {
+    cuerpo = `<p class="ceja">Pregunta ${paso.numero}</p>${cosa}
+      <h3 class="clasif-pregunta">${esc(paso.texto)}</h3>
+      <p class="ayuda">${esc(paso.ayuda)}</p>
+      <div class="fila-botones clasif-respuestas">${boton('clasif-responder', 'Sí', { id: 'si', clase: 'primario' })}${boton('clasif-responder', 'No', { id: 'no' })}</div>
+      <div class="fila-botones">${clasif.respuestas.length ? boton('clasif-atras', '‹ Atrás', { clase: 'chico plano' }) : ''}${boton('cerrar-dialogo', 'Cerrar', { clase: 'chico plano' })}</div>`;
+  } else {
+    cuerpo = `<p class="ceja">Resultado</p>${cosa}
+      <p class="clasif-resultado">Es: <strong>${esc(paso.nombre)}</strong></p>
+      <p>${esc(paso.texto)}</p>
+      ${resultadoClasificarHtml(paso)}
+      <details class="consejos"><summary>Por qué</summary><ul>${clasif.respuestas
+        .map((r, k) => `<li>${esc(L.pasoClasificar(clasif.respuestas.slice(0, k)).texto)} <strong>${r ? 'Sí' : 'No'}</strong></li>`)
+        .join('')}</ul></details>
+      <div class="fila-botones">${boton('clasif-atras', '‹ Cambiar una respuesta', { clase: 'chico plano' })}${boton('clasif-otra', 'Clasificar otra cosa', { clase: 'chico plano' })}${boton('cerrar-dialogo', 'Cerrar', { clase: 'chico plano' })}</div>`;
+  }
+  $dialogo.innerHTML = `<form novalidate data-clasificar><h2 id="dialogo-titulo">¿Qué es esto?</h2>${cuerpo}<p class="error" data-error hidden></p></form>`;
+  $dialogo.querySelector('form').addEventListener('submit', (e) => e.preventDefault());
+  if (!$dialogo.open) $dialogo.showModal();
+  $dialogo.querySelector('.clasif-respuestas button, select, .clasif-accion')?.focus();
+}
+
+/** Qué hacer con el resultado: crearlo donde corresponde o dejarlo en «Por ordenar». */
+function resultadoClasificarHtml(paso) {
+  const desdeBandeja = !!clasif.bandejaId;
+  const porOrdenar = desdeBandeja ? '' : boton('clasif-por-ordenar', 'Dejar en «Por ordenar»', { clase: 'chico' });
+  if (paso.pieza === 'tarea') {
+    const opciones = opcionesObjetivos();
+    if (!opciones) return `<p class="ayuda">Aún no tienes objetivos donde ponerla. Crea primero su proyecto, o déjala en «Por ordenar» por ahora.</p><div class="fila-botones">${porOrdenar}</div>`;
+    return `<div class="campo"><label for="c-objetivo">¿En qué objetivo va?</label><select id="c-objetivo">${opciones}</select></div>
+      <div class="fila-botones">${boton('clasif-crear', 'Crear la tarea', { clase: 'chico primario clasif-accion' })}${porOrdenar}</div>`;
+  }
+  if (paso.pieza === 'objetivo') {
+    const activos = L.ordenarProyectos(datos, hoy()).filter((p) => p.estado === 'activo');
+    const nuevo = boton('clasif-crear-proyecto-para', 'Crear un proyecto para este objetivo', { clase: `chico${activos.length ? '' : ' primario clasif-accion'}` });
+    if (!activos.length) return `<p class="ayuda">Un objetivo va dentro de un proyecto, y aún no tienes ninguno activo.</p><div class="fila-botones">${nuevo}${porOrdenar}</div>`;
+    return `<div class="campo"><label for="c-proyecto">¿De qué proyecto es parte?</label><select id="c-proyecto">${activos.map((p) => `<option value="${esc(p.id)}">${esc(p.nombre)}</option>`).join('')}</select></div>
+      <div class="fila-botones">${boton('clasif-crear', 'Crear el objetivo', { clase: 'chico primario clasif-accion' })}${nuevo}</div>`;
+  }
+  if (paso.pieza === 'proyecto') {
+    const n = L.principalesActivos(datos);
+    const aviso = paso.tipoProyecto === 'principal' && n >= 3
+      ? `<p class="aviso">Ya tienes ${n} proyectos principales. Antes de sumar otro, considera pasar uno a secundario: con muchos, todo avanza lento.</p>` : '';
+    return `${aviso}<div class="fila-botones">${boton('clasif-crear', paso.estado === 'pausado' ? 'Crear en pausa' : 'Crear el proyecto', { clase: 'chico primario clasif-accion' })}</div>`;
+  }
+  if (paso.pieza === 'fuera' && desdeBandeja) return `<div class="fila-botones">${boton('clasif-quitar', 'Sacar de «Por ordenar»', { clase: 'chico primario clasif-accion' })}</div>`;
+  if (paso.pieza === 'idea' && desdeBandeja) return '<p class="ayuda">Ya está en «Por ordenar». Decide en tu revisión semanal.</p>';
+  return `<div class="fila-botones">${porOrdenar}</div>`;
+}
+
+/** Saca de «Por ordenar» lo que acabas de clasificar, dentro del mismo cambio (un solo Deshacer). */
+const sacarDeBandeja = (bandejaId) => (d) => {
+  if (bandejaId) d.bandeja = d.bandeja.filter((b) => b.id !== bandejaId);
+};
+
+function crearDesdeClasificar() {
+  const paso = L.pasoClasificar(clasif.respuestas);
+  const { texto, bandejaId } = clasif;
+  const quitar = sacarDeBandeja(bandejaId);
+  if (paso.pieza === 'tarea') {
+    const objetivoId = $dialogo.querySelector('#c-objetivo')?.value;
+    if (!objetivoId) return;
+    const tamano = paso.id === 'tarea-simple' ? { tamano: 'simple', minutos: L.TAMANOS.simple.minutos } : L.TAREA_RAPIDA;
+    const tarea = L.nuevaTarea({ id: crearId(), objetivoId, titulo: texto, ...tamano, creado: hoy() });
+    $dialogo.close();
+    cambiar((d) => {
+      d.tareas.push(tarea);
+      quitar(d);
+    }, `Tarea creada en "${buscar(datos.objetivos, objetivoId).nombre}".`);
+    return;
+  }
+  if (paso.pieza === 'objetivo') {
+    const proyectoId = $dialogo.querySelector('#c-proyecto')?.value;
+    if (!proyectoId) return;
+    location.hash = `#/proyecto/${encodeURIComponent(proyectoId)}`;
+    dialogoObjetivo(proyectoId, null, false, null, { nombre: texto, tipo: paso.id === 'objetivo-tiempo' ? 'tiempo' : 'resultado', alCrear: quitar });
+    return;
+  }
+  if (paso.estado === 'pausado') {
+    const proyecto = { id: crearId(), nombre: texto, tipo: 'secundario', estado: 'pausado', descripcion: '', creado: hoy() };
+    $dialogo.close();
+    cambiar((d) => {
+      d.proyectos.push(proyecto);
+      quitar(d);
+    }, `"${texto}" quedó en pausa. Actívalo cuando sea su momento (en Editar proyecto).`);
+    return;
+  }
+  dialogoProyecto(null, null, { nombre: texto, tipo: paso.tipoProyecto, alCrear: quitar });
 }
 
 // ---------- Diálogos ----------
@@ -973,14 +1501,16 @@ function dialogoPlantillas() {
   $dialogo.querySelector('button[type=submit]').remove(); // aquí solo se elige una idea
 }
 
-function dialogoProyecto(p = null, plantilla = null) {
+/** `inicial` (desde «¿Qué es esto?»): nombre y tipo sugeridos, el objetivo que sigue y `alCrear(d)` para sacarlo de «Por ordenar». */
+function dialogoProyecto(p = null, plantilla = null, inicial = {}) {
   const nuevo = !p;
-  const base = p ?? { id: crearId(), nombre: '', tipo: 'principal', estado: 'activo', descripcion: plantilla?.descripcion ?? '', creado: hoy() };
+  const base = p ?? { id: crearId(), nombre: inicial.nombre ?? '', tipo: inicial.tipo ?? 'principal', estado: 'activo', descripcion: plantilla?.descripcion ?? '', creado: hoy() };
   abrirDialogo(
     nuevo ? (plantilla ? `Nuevo proyecto: ${plantilla.nombre.toLowerCase()}` : 'Nuevo proyecto') : 'Editar proyecto',
     `${plantilla ? `<p class="ayuda">Se crea con ${plural(plantilla.objetivos.length, 'objetivo', 'objetivos')} y sus tareas. Solo ponle nombre.</p>` : ''}
      ${nuevo && !plantilla ? `<p class="ayuda">¿Sin ideas? ${boton('ver-plantillas', 'Ver ideas de proyectos', { clase: 'chico plano' })}</p>` : ''}
      ${consejosHtml('proyecto')}
+     ${nuevo && !plantilla ? `<p class="ayuda">¿No sabes si es proyecto? ${boton('clasificar', '¿Qué es esto?', { clase: 'chico plano' })}</p>` : ''}
      <div class="campo"><label for="p-nombre">Nombre</label><input id="p-nombre" name="nombre" maxlength="300" required value="${esc(base.nombre)}" placeholder="${esc(plantilla?.ejemplo ?? 'FarmaCheck')}"></div>
      <fieldset class="campo"><legend>¿Qué tan importante es?</legend>
        ${opciones('tipo', [['principal', 'Principal', 'Donde está tu foco. Se recomienda primero.'], ['secundario', 'Secundario', 'Avanza cuando hay tiempo.']], base.tipo)}
@@ -1006,10 +1536,13 @@ function dialogoProyecto(p = null, plantilla = null) {
         }, `Proyecto creado con ${plural(objetivos.length, 'objetivo', 'objetivos')} y ${plural(tareas.length, 'tarea', 'tareas')}. Ajústalos a tu medida.`);
         location.hash = `#/proyecto/${encodeURIComponent(proyecto.id)}`;
       } else if (nuevo) {
-        cambiar((d) => d.proyectos.push(proyecto), 'Proyecto creado.');
+        cambiar((d) => {
+          d.proyectos.push(proyecto);
+          inicial.alCrear?.(d);
+        }, 'Proyecto creado.');
         location.hash = `#/proyecto/${encodeURIComponent(proyecto.id)}`;
         // Flujo natural: un proyecto nuevo pide su primer objetivo.
-        setTimeout(() => dialogoObjetivo(proyecto.id, null, true), 0);
+        setTimeout(() => dialogoObjetivo(proyecto.id, null, true, null, inicial.objetivo ?? {}), 0);
       } else {
         cambiar((d) => (d.proyectos[d.proyectos.findIndex((x) => x.id === proyecto.id)] = proyecto), 'Proyecto guardado.');
       }
@@ -1023,15 +1556,15 @@ function dialogoProyecto(p = null, plantilla = null) {
  * - Nuevo: meta concreta ("¿cómo sabrás que lo lograste?") y, si es de resultado, las tareas para llegar (una por línea).
  * - Ampliar (`ampliarDe`): crea la siguiente etapa; la anterior queda lograda y guardada dentro de la nueva.
  */
-function dialogoObjetivo(proyectoId, o = null, primero = false, ampliarDe = null) {
+function dialogoObjetivo(proyectoId, o = null, primero = false, ampliarDe = null, inicial = {}) {
   const nuevo = !o;
   const base =
     o ??
     L.nuevoObjetivo({
       id: crearId(),
       proyectoId: ampliarDe?.proyectoId ?? proyectoId,
-      nombre: '',
-      tipo: ampliarDe?.tipo ?? 'resultado',
+      nombre: inicial.nombre ?? '',
+      tipo: ampliarDe?.tipo ?? inicial.tipo ?? 'resultado',
       minutosMeta: ampliarDe?.minutosMeta ?? null,
       periodo: ampliarDe?.periodo ?? null,
       creado: hoy(),
@@ -1092,7 +1625,10 @@ function dialogoObjetivo(proyectoId, o = null, primero = false, ampliarDe = null
         if (ampliarDe) {
           L.ampliarObjetivo(d, ampliarDe.id, objetivo, { llevarPendientes: !!fd.get('llevar'), faltantesComoTareas: !!fd.get('faltantes'), crearId });
         }
-        else if (nuevo) d.objetivos.push(objetivo);
+        else if (nuevo) {
+          d.objetivos.push(objetivo);
+          inicial.alCrear?.(d);
+        }
         else d.objetivos[d.objetivos.findIndex((x) => x.id === objetivo.id)] = objetivo;
         d.tareas.push(...tareas);
       }, tareas.length ? `${mensaje} Con ${plural(tareas.length, 'tarea', 'tareas')}.` : mensaje);
@@ -1170,13 +1706,16 @@ function dialogoTarea(objetivoId, t = null) {
       };
       const errores = L.erroresTarea(tarea, new Map(datos.objetivos.map((x) => [x.id, x])));
       if (errores.length) return textoErrores(errores);
+      const reabre = o.logrado && nueva;
       cambiar((d) => {
         if (nueva) d.tareas.push(tarea);
         else {
           d.tareas[d.tareas.findIndex((x) => x.id === tarea.id)] = tarea;
           if (tarea.objetivoId !== t.objetivoId) L.moverTarea(d, tarea.id, tarea.objetivoId); // sus notas se van con ella
         }
-      }, nueva ? 'Tarea creada.' : 'Tarea guardada.');
+        // Una tarea pendiente en un objetivo logrado lo vuelve a poner en curso (si no, nunca se recomendaría).
+        L.reabrirSiPendiente(d, tarea.objetivoId);
+      }, nueva ? (reabre ? `Tarea creada. "${o.nombre}" vuelve a estar en curso.` : 'Tarea creada.') : 'Tarea guardada.');
     },
     nueva ? 'Crear tarea' : 'Guardar',
   );
@@ -1221,24 +1760,27 @@ function dialogoLibres() {
        <div class="campo"><label for="libres">Minutos libres</label><input id="libres" name="libres" type="number" inputmode="numeric" min="0" max="1440" step="5" required></div>
      </div>
      <p class="ayuda" data-plantilla></p>
-     <div class="checks"><label><input type="checkbox" name="plantilla" value="1"> Usar mi semana normal ese día</label></div>`,
+     <div class="checks"><label><input type="checkbox" name="plantilla" value="1"> Usar mi ${datos.disponibilidad.ciclo ? 'ciclo de turnos' : 'semana normal'} ese día</label></div>`,
     (fd) => {
       const dia = fd.get('dia');
       if (!L.esFechaValida(dia) || dia < f) return 'Elige hoy o un día futuro.';
       if (fd.get('plantilla')) {
-        cambiar((d) => delete d.disponibilidad.excepciones[dia], `${etiquetaDia(dia)} usa tu semana normal.`);
+        cambiar((d) => delete d.disponibilidad.excepciones[dia], `${etiquetaDia(dia)} usa tu ${datos.disponibilidad.ciclo ? 'ciclo de turnos' : 'semana normal'}.`);
         return;
       }
       const n = Number(fd.get('libres'));
       if (!Number.isInteger(n) || n < 0 || n > 1440) return 'Escribe un número entero de minutos, de 0 a 1440.';
+      marcarLibresTutorial();
       cambiar((d) => (d.disponibilidad.excepciones[dia] = n), `${etiquetaDia(dia)}: ${dur(n)} libres.`);
     },
   );
   const $dia = form.querySelector('#libres-dia');
   const actualizar = () => {
     if (!L.esFechaValida($dia.value)) return;
-    const plantilla = datos.disponibilidad.plantilla[L.diaSemana($dia.value)];
-    form.querySelector('[data-plantilla]').textContent = `Tu semana normal para ese ${NOMBRES_DIA[L.diaSemana($dia.value)].toLowerCase()}: ${dur(plantilla)}.`;
+    const ciclo = L.diaDelCiclo(datos.disponibilidad, $dia.value);
+    form.querySelector('[data-plantilla]').textContent = ciclo
+      ? `Según tu ciclo, ese día es ${nombreDiaCiclo(ciclo)}: ${dur(ciclo.minutos)}.`
+      : `Tu semana normal para ese ${NOMBRES_DIA[L.diaSemana($dia.value)].toLowerCase()}: ${dur(L.minutosBase(datos.disponibilidad, $dia.value))}.`;
     form.querySelector('#libres').value = L.minutosLibres(datos.disponibilidad, $dia.value);
   };
   $dia.addEventListener('change', actualizar);
@@ -1509,7 +2051,7 @@ function exportar() {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
   datos = { ...datos, meta: { ...datos.meta, ultimoRespaldo: f } };
-  guardar(datos);
+  persistir(datos);
   render();
   avisar('Respaldo descargado. Guárdalo fuera de este equipo (por ejemplo, en tu Drive).');
 }
@@ -1537,7 +2079,7 @@ function reemplazarDatos(nuevos, mensaje) {
   guardarCopiaPrevia(datos, new Date().toISOString());
   datos = nuevos;
   deshacerTexto = null;
-  guardar(datos);
+  persistir(datos);
   render();
   avisar(mensaje);
 }
@@ -1587,7 +2129,10 @@ const acciones = {
     plan.items = plan.items.filter((i) => i.id !== id);
   }, 'Quitado de tu plan.'),
   'editar-libres': () => dialogoLibres(),
-  'quitar-excepcion': (f) => cambiar((d) => delete d.disponibilidad.excepciones[f], `${etiquetaDia(f)} vuelve a tu semana normal.`),
+  'editar-ciclo': () => dialogoCiclo(),
+  'quitar-ciclo': () => cambiar((d) => (d.disponibilidad.ciclo = null), 'Volviste a tu semana fija.'),
+  'registrar-tiempo': () => dialogoRegistrar(),
+  'quitar-excepcion': (f) => cambiar((d) => delete d.disponibilidad.excepciones[f], `${etiquetaDia(f)} vuelve a tu ${datos.disponibilidad.ciclo ? 'ciclo de turnos' : 'semana normal'}.`),
 
   // Proyectos
   'nuevo-proyecto': () => dialogoProyecto(),
@@ -1714,7 +2259,10 @@ const acciones = {
     });
     const errores = L.erroresTarea(tarea, new Map(datos.objetivos.map((x) => [x.id, x])));
     if (errores.length) return avisar(textoErrores(errores));
-    cambiar((d) => d.tareas.push(tarea), `Tarea "${idea.titulo}" agregada.`);
+    cambiar((d) => {
+      d.tareas.push(tarea);
+      L.reabrirSiPendiente(d, tarea.objetivoId);
+    }, `Tarea "${idea.titulo}" agregada.`);
     ideas.agregadas.add(Number(i));
     pintarIdeas($dialogo.querySelector('form'));
   },
@@ -1731,6 +2279,7 @@ const acciones = {
     const t = buscar(d.tareas, id);
     t.hecha = false;
     t.hechaEl = null;
+    L.reabrirSiPendiente(d, t.objetivoId);
   }, 'Tarea reabierta.'),
 
   // Notas
@@ -1781,6 +2330,76 @@ const acciones = {
     avisoCarga = null;
     render();
   },
+  'reintentar-guardar': () => {
+    const ok = persistir(datos);
+    render();
+    avisar(ok ? 'Listo: tus cambios quedaron guardados.' : 'Sigue sin poder guardar. Descarga un respaldo para no perder lo de hoy.', false, ok ? '' : 'error');
+  },
+
+  // ¿Qué es esto?
+  clasificar: () => dialogoClasificar(),
+  'clasificar-bandeja': (id) => {
+    const b = buscar(datos.bandeja, id);
+    if (b) dialogoClasificar(b.texto, b.id);
+  },
+  'clasif-responder': (valor) => {
+    clasif.respuestas.push(valor === 'si');
+    pintarClasificar();
+  },
+  'clasif-atras': () => {
+    clasif.respuestas.pop();
+    pintarClasificar();
+  },
+  'clasif-otra': () => dialogoClasificar(),
+  'clasif-crear': () => crearDesdeClasificar(),
+  'clasif-crear-proyecto-para': () => {
+    const paso = L.pasoClasificar(clasif.respuestas);
+    dialogoProyecto(null, null, {
+      objetivo: { nombre: clasif.texto, tipo: paso.id === 'objetivo-tiempo' ? 'tiempo' : 'resultado', alCrear: sacarDeBandeja(clasif.bandejaId) },
+    });
+  },
+  'clasif-por-ordenar': () => {
+    const texto = clasif.texto;
+    $dialogo.close();
+    cambiar((d) => d.bandeja.push({ id: crearId(), texto, fecha: hoy() }), 'Quedó en «Por ordenar», arriba en Mi día.');
+  },
+  'clasif-quitar': () => {
+    const quitar = sacarDeBandeja(clasif.bandejaId);
+    $dialogo.close();
+    cambiar(quitar, 'Sacado de «Por ordenar».');
+  },
+
+  // Tutorial
+  'tutorial-empezar': () => {
+    avancePrevio = null;
+    irACuadro(0);
+  },
+  'tutorial-siguiente': () => irACuadro(tutorial.cuadro + 1, { saltarHechos: true }),
+  'tutorial-anterior': () => irACuadro(tutorial.cuadro - 1),
+  'tutorial-mostrar': () => mostrarDondeTutorial(),
+  'tutorial-ocultar': () => {
+    guardarTutorial({ estado: 'minimizado' });
+    pintarTutorial();
+  },
+  'tutorial-abrir': () => {
+    guardarTutorial({ estado: 'activo' });
+    pintarTutorial();
+  },
+  'tutorial-salir': () => {
+    guardarTutorial({ estado: 'cerrado' });
+    pintarTutorial();
+    avisar('Tutorial cerrado. Lo puedes retomar cuando quieras desde la Guía.');
+  },
+  'tutorial-terminar': () => {
+    guardarTutorial({ estado: 'terminado' });
+    pintarTutorial();
+    avisar('¡Bien hecho! La Guía queda en el menú por si la necesitas.', false, 'grande');
+  },
+  'tutorial-libres-ok': () => {
+    marcarLibresTutorial();
+    seguirTutorial();
+    pintarTutorial();
+  },
 };
 
 document.addEventListener('click', (e) => {
@@ -1823,6 +2442,7 @@ const formularios = {
   disponibilidad: (fd) => {
     const plantilla = [0, 1, 2, 3, 4, 5, 6].map((i) => Number(fd.get(`d${i}`)));
     if (!plantilla.every((m) => Number.isInteger(m) && m >= 0 && m <= 1440)) return 'Cada día debe tener minutos enteros de 0 a 1440.';
+    marcarLibresTutorial();
     cambiar((d) => (d.disponibilidad.plantilla = plantilla), 'Minutos libres guardados.');
   },
 };
@@ -1868,6 +2488,7 @@ document.addEventListener('change', (e) => {
         terminada = true;
       } else if (!marcado && t.hecha) {
         t.hecha = false;
+        L.reabrirSiPendiente(d, t.objetivoId);
       }
     }, terminada ? '' : null, { celebrar: marcado ? proyectoDe({ tareaId }) : null });
     if (terminada) {
@@ -1893,9 +2514,14 @@ document.addEventListener(
 );
 
 window.addEventListener('hashchange', () => {
+  const mostrar = mostrarAlPintar; // «Muéstrame dónde» del tutorial: se muestra después de volver arriba
   render();
   $main.focus({ preventScroll: true });
   window.scrollTo(0, 0);
+  if (mostrar) {
+    mostrarAlPintar = true;
+    pintarTutorial();
+  }
 });
 
 // Si la app queda abierta y cambia el día, se redibuja al volver.

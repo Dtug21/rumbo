@@ -10,7 +10,12 @@ export const crearId = () =>
 
 /** Devuelve { datos, aviso, nuevo }. Si lo guardado está dañado, lo aparta (no lo borra) y parte vacío. */
 export function cargar(hoy) {
-  const texto = localStorage.getItem(CLAVE);
+  let texto;
+  try {
+    texto = localStorage.getItem(CLAVE);
+  } catch {
+    return { datos: datosVacios(hoy), aviso: 'Este navegador no deja guardar datos (¿modo privado o almacenamiento bloqueado?). Puedes usar Rumbo, pero nada quedará guardado al cerrar.', nuevo: false };
+  }
   if (!texto) return { datos: datosVacios(hoy), aviso: null, nuevo: true };
   try {
     const obj = JSON.parse(texto);
@@ -21,7 +26,11 @@ export function cargar(hoy) {
     if (obj.version !== datos.version) guardarCopiaPrevia(obj, new Date().toISOString());
     return { datos, aviso: null, nuevo: obj.version !== datos.version };
   } catch (err) {
-    localStorage.setItem(CLAVE_DANADO, texto);
+    try {
+      localStorage.setItem(CLAVE_DANADO, texto);
+    } catch {
+      // sin espacio para apartarlo: igual se avisa
+    }
     return {
       datos: datosVacios(hoy),
       aviso: `Los datos guardados estaban dañados (${err.message}). Quedaron apartados en "${CLAVE_DANADO}" y partí vacío. Si tienes un respaldo, impórtalo en Ajustes.`,
@@ -30,13 +39,36 @@ export function cargar(hoy) {
   }
 }
 
+/** Guarda y dice si pudo: el navegador puede negarse (almacenamiento lleno o bloqueado). */
 export function guardar(datos) {
-  localStorage.setItem(CLAVE, JSON.stringify(datos));
+  try {
+    localStorage.setItem(CLAVE, JSON.stringify(datos));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Copia automática antes de reemplazar los datos (al importar o al migrar de versión). */
 export function guardarCopiaPrevia(datos, cuando) {
-  localStorage.setItem(CLAVE_COPIA, JSON.stringify({ cuando, datos }));
+  try {
+    localStorage.setItem(CLAVE_COPIA, JSON.stringify({ cuando, datos }));
+  } catch {
+    // sin espacio para la copia: el reemplazo sigue, y el aviso de guardado avisará si tampoco cabe lo nuevo
+  }
+}
+
+/**
+ * Pide al navegador que no borre estos datos por falta de espacio (almacenamiento persistente).
+ * Algunos navegadores lo conceden solos; otros preguntan. Si no se puede, no pasa nada.
+ */
+export async function pedirPersistencia() {
+  try {
+    if (!navigator.storage?.persist || (await navigator.storage.persisted())) return;
+    await navigator.storage.persist();
+  } catch {
+    // no disponible
+  }
 }
 
 export function leerCopiaPrevia() {
