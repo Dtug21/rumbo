@@ -42,7 +42,7 @@ export const PASOS_BASE = Object.freeze([
 
 const LIMITES = {
   proyectos: 200, objetivos: 1000, tareas: 5000, pasos: 50, registros: 50000, notas: 20000,
-  texto: 300, criterio: 500, nota: 2000, descripcion: 5000, minutos: 1440, metaMinutos: 100000, etapa: 100, bandeja: 500, momento: 120, nombreTurno: 30,
+  texto: 300, criterio: 500, nota: 2000, descripcion: 5000, minutos: 1440, metaMinutos: 100000, etapa: 100, bandeja: 500, momento: 120, nombreTurno: 30, esperando: 120, unidad: 30, cantidad: 10000,
 };
 // Al crear tareas desde una lista (una por línea) parten como medias de 1 h; se ajustan después.
 export const TAREA_RAPIDA = Object.freeze({ tamano: 'media', minutos: 60 });
@@ -169,6 +169,38 @@ export const excedida = (t, datos) => !t.hecha && minutosTrabajados(datos, t.id)
 /** Los objetivos de tiempo semanales se reinician cada lunes: se muestran como ritmo y no suman al avance del proyecto. */
 export const esRitmoSemanal = (o) => o.tipo === 'tiempo' && o.periodo === 'semana';
 
+/**
+ * Objetivo de tiempo que se mide en unidades (postulaciones, propuestas, llamadas…) en vez de horas:
+ * `unidad` (en plural), `metaCantidad` por periodo y `minutosPorUnidad` (lo que suele tomar cada una, para planificar).
+ * Cada registro guarda cuántas hiciste (`cantidad`) y los minutos que tomó.
+ */
+export const esConteo = (o) => o.tipo === 'tiempo' && typeof o.unidad === 'string' && o.unidad !== '';
+export const unidadSingular = (u) => (/iones$/i.test(u) ? u.replace(/iones$/i, 'ión') : u.replace(/s$/i, ''));
+export const textoCantidad = (o, n) => `${n} ${n === 1 ? unidadSingular(o.unidad) : o.unidad}`;
+
+/** Cantidad registrada para un objetivo por conteo: en la semana actual (lunes a domingo) o en total. */
+export function cantidadRegistrada(datos, objetivoId, periodo, hoy) {
+  const desde = periodo === 'semana' ? inicioSemana(hoy) : null;
+  const hasta = periodo === 'semana' ? sumarDias(desde, 6) : null;
+  return datos.registros
+    .filter((r) => r.objetivoId === objetivoId && (!desde || (r.fecha >= desde && r.fecha <= hasta)))
+    .reduce((s, r) => s + (r.cantidad ?? 0), 0);
+}
+export const cantidadHoy = (datos, hoy, objetivoId) =>
+  datos.registros.filter((r) => r.fecha === hoy && r.objetivoId === objetivoId).reduce((s, r) => s + (r.cantidad ?? 0), 0);
+
+/** Unidades sugeridas hoy para un objetivo por conteo (0 si ya va al día): reparte lo que falta en los días que quedan. */
+export function unidadesSugeridas(o, datos, hoy) {
+  const falta = o.metaCantidad - cantidadRegistrada(datos, o.id, o.periodo, hoy);
+  if (falta <= 0) return 0;
+  let ritmo;
+  if (o.periodo === 'semana') ritmo = falta / (7 - indiceEnSemana(hoy));
+  else if (o.plazo) ritmo = falta / Math.max(1, diasEntre(hoy, o.plazo) + 1);
+  else ritmo = 1;
+  const sugerido = Math.min(falta, Math.max(1, Math.ceil(ritmo)), 8);
+  return Math.max(0, sugerido - cantidadHoy(datos, hoy, o.id));
+}
+
 /** Minutos registrados para un objetivo: en la semana actual (lunes a domingo) o en total. */
 export function minutosRegistrados(datos, objetivoId, periodo, hoy) {
   const desde = periodo === 'semana' ? inicioSemana(hoy) : null;
@@ -189,6 +221,10 @@ export const minutosHoy = (datos, hoy, objetivoId = null) =>
 export function progresoObjetivo(o, datos, hoy) {
   if (o.tipo === 'tiempo') {
     const minutos = minutosRegistrados(datos, o.id, o.periodo, hoy);
+    if (esConteo(o)) {
+      const cantidad = cantidadRegistrada(datos, o.id, o.periodo, hoy);
+      return { valor: Math.min(1, cantidad / o.metaCantidad), minutos, meta: o.minutosMeta, cantidad, metaCantidad: o.metaCantidad };
+    }
     return { valor: Math.min(1, minutos / o.minutosMeta), minutos, meta: o.minutosMeta };
   }
   const tareas = tareasDe(datos, o.id);
@@ -300,6 +336,7 @@ export const CICLO_MAX = 14;
 export function diaDelCiclo(disponibilidad, fecha) {
   const c = disponibilidad.ciclo;
   if (!c) return null;
+  if (c.desde && fecha < c.desde) return null; // el ciclo rige desde esa fecha; antes, tu semana fija
   const k = c.minutos.length;
   const i = (((diasEntre(c.inicio, fecha) % k) + k) % k);
   return { indice: i, numero: i + 1, total: k, nombre: c.nombres[i] ?? '', minutos: c.minutos[i] };
@@ -438,39 +475,45 @@ export function candidatos(datos, hoy) {
     if (o.tipo === 'tiempo') {
       const clave = `o:${o.id}`;
       if (fuera.has(clave)) continue;
-      const minutos = minutosSugeridosTiempo(o, datos, hoy);
+      const conteo = esConteo(o);
+      const unidades = conteo ? unidadesSugeridas(o, datos, hoy) : 0;
+      const minutos = conteo ? unidades * o.minutosPorUnidad : minutosSugeridosTiempo(o, datos, hoy);
       if (!minutos) continue;
       const motivos = [];
       let puntos = 5;
-      const hecho = minutosRegistrados(datos, o.id, o.periodo, hoy);
+      const hecho = conteo ? cantidadRegistrada(datos, o.id, o.periodo, hoy) : minutosRegistrados(datos, o.id, o.periodo, hoy);
+      const meta = conteo ? o.metaCantidad : o.minutosMeta;
+      const fmt = (n) => (conteo ? textoCantidad(o, n) : formatoDuracion(n));
       if (o.periodo === 'semana') {
         // Atraso respecto de lo esperado a esta altura de la semana, y un empujón
         // cuando quedan 3 días o menos y lo que falta ya no cabe a ritmo normal: si no, una tarea
         // vieja le gana siempre y el ritmo semanal se queda en cero.
         const indice = indiceEnSemana(hoy);
-        const esperado = (o.minutosMeta * indice) / 7;
+        const esperado = (meta * indice) / 7;
         const quedan = 7 - indice;
         // Los primeros días pesa como antes (hasta 40): un plazo cercano de una tarea debe ganarle. Al final de la semana, hasta 70.
         const maximo = quedan <= 3 ? PUNTOS_ATRASO_RITMO : PUNTOS_ATRASO_INICIO;
-        if (hecho < esperado) puntos += Math.round((maximo * (esperado - hecho)) / o.minutosMeta);
-        const apurado = quedan <= 3 && (o.minutosMeta - hecho) / quedan > (1.5 * o.minutosMeta) / 7;
+        if (hecho < esperado) puntos += Math.round((maximo * (esperado - hecho)) / meta);
+        const apurado = quedan <= 3 && (meta - hecho) / quedan > (1.5 * meta) / 7;
         if (apurado) puntos += 15;
-        motivos.push(`Vas ${formatoDuracion(hecho)} de ${formatoDuracion(o.minutosMeta)} esta semana${apurado ? ` y ${quedan === 1 ? 'hoy es el último día' : `quedan ${quedan} días`}` : ''}`);
+        motivos.push(`Vas ${conteo ? `${hecho} de ${textoCantidad(o, meta)}` : `${fmt(hecho)} de ${fmt(meta)}`} esta semana${apurado ? ` y ${quedan === 1 ? 'hoy es el último día' : `quedan ${quedan} días`}` : ''}`);
       } else {
-        motivos.push(`Llevas ${formatoDuracion(hecho)} de ${formatoDuracion(o.minutosMeta)}`);
+        motivos.push(`Llevas ${conteo ? `${hecho} de ${textoCantidad(o, meta)}` : `${fmt(hecho)} de ${fmt(meta)}`}`);
       }
       if (mp) {
         puntos += mp.puntos;
         motivos.unshift(mp.texto);
       }
       puntos += comunes(p, o, motivos);
-      lista.push({ clave, tipo: 'tiempo', proyecto: p, objetivo: o, tarea: null, minutos, puntos, motivos, ajustable: true, vencido: vencido(o.plazo, 'objetivo', o.id) });
+      lista.push({ clave, tipo: 'tiempo', proyecto: p, objetivo: o, tarea: null, minutos, unidades: conteo ? unidades : null, puntos, motivos, ajustable: true, vencido: vencido(o.plazo, 'objetivo', o.id) });
       continue;
     }
 
     if (o.logrado) continue;
     const tareas = tareasDe(datos, o.id);
     const pendientes = tareas.filter((t) => !t.hecha);
+    // Las que esperan algo (una respuesta, un trámite) no se recomiendan hasta su fecha, y no frenan a las siguientes.
+    const disponibles = pendientes.filter((t) => !enEspera(t, hoy));
 
     // Objetivo sin tareas pendientes: la recomendación es planificarlo.
     if (!pendientes.length) {
@@ -487,9 +530,10 @@ export function candidatos(datos, hoy) {
       continue;
     }
 
+    if (!disponibles.length) continue; // todo lo que le queda está en espera
     // Las tareas van en orden: se recomiendan solo las primeras pendientes del objetivo
     // (no "Enviar la postulación" antes de "Leer las bases"), salvo que una tenga su propio plazo cercano.
-    const enOrden = new Set(pendientes.slice(0, TAREAS_EN_ORDEN).map((t) => t.id));
+    const enOrden = new Set(disponibles.slice(0, TAREAS_EN_ORDEN).map((t) => t.id));
     // En objetivos de 3 o más tareas, la última (suele ser "Enviar" o "Entregar") espera a que las demás estén hechas.
     if (tareas.length >= 3 && pendientes.length > 1) enOrden.delete(pendientes.at(-1).id);
     // Gradiente de meta: cerca de lograr el objetivo, el impulso sube (Kivetz y otros, 2006).
@@ -497,7 +541,7 @@ export function candidatos(datos, hoy) {
     const cerca = pendientes.length === 1
       ? `Es la última tarea para lograr "${o.nombre}"`
       : avanceObjetivo >= CERCA_DE_LA_META ? `Te falta poco para lograr "${o.nombre}" (${porcentaje(avanceObjetivo)})` : null;
-    for (const t of pendientes) {
+    for (const t of disponibles) {
       const clave = `t:${t.id}`;
       if (fuera.has(clave)) continue;
       const plazoPropio = t.plazo ? diasEntre(hoy, t.plazo) : null;
@@ -530,8 +574,13 @@ export function candidatos(datos, hoy) {
       const siguiente = t.pasos.find((x) => !x.hecho);
       if (siguiente) motivos.push(`Siguiente paso: ${siguiente.texto}`);
       if (!motivos.length) motivos.push(`Avanza tu objetivo "${o.nombre}"`);
+      // Terminó la espera: ya puedes retomarla.
+      if (t.noAntesDe && t.esperando) {
+        puntos += 10;
+        motivos.unshift(`Ya puedes retomarla (esperabas: ${t.esperando.length > 60 ? `${t.esperando.slice(0, 60)}…` : t.esperando})`);
+      }
       // En empate, primero la que va antes en el orden (y no la más corta).
-      if (t.id === pendientes[0].id && pendientes.length > 1) puntos += 1;
+      if (t.id === disponibles[0].id && disponibles.length > 1) puntos += 1;
       lista.push({
         clave, tipo: 'tarea', proyecto: p, objetivo: o, tarea: t, minutos: minutosSesion(t, datos), puntos, motivos, ajustable: t.tamano !== 'simple',
         vencido: t.plazo ? vencido(t.plazo, 'tarea', t.id) : vencido(o.plazo, 'objetivo', o.id),
@@ -555,11 +604,21 @@ export function elegirRecomendaciones(lista, disponibles, max = MAX_RECOMENDACIO
     if (elegidas.length >= max) break;
     if ((porObjetivo.get(c.objetivo.id) ?? 0) >= MAX_POR_OBJETIVO) continue;
     let minutos = c.minutos;
+    let unidades = c.unidades ?? null;
     if (minutos > quedan) {
-      if (!c.ajustable || quedan < SESION_MIN) continue;
-      minutos = Math.floor(quedan / 5) * 5;
+      if (!c.ajustable) continue;
+      if (unidades) {
+        // Por conteo: entran las unidades enteras que quepan (cada una con su tiempo).
+        const porUnidad = c.objetivo.minutosPorUnidad;
+        unidades = Math.floor(quedan / porUnidad);
+        if (unidades < 1) continue;
+        minutos = unidades * porUnidad;
+      } else {
+        if (quedan < SESION_MIN) continue;
+        minutos = Math.floor(quedan / 5) * 5;
+      }
     }
-    elegidas.push(minutos === c.minutos ? c : { ...c, minutos, acortada: true });
+    elegidas.push(minutos === c.minutos ? c : { ...c, minutos, unidades, acortada: true });
     porObjetivo.set(c.objetivo.id, (porObjetivo.get(c.objetivo.id) ?? 0) + 1);
     quedan -= minutos;
   }
@@ -676,6 +735,81 @@ export function diasConAvance(datos, desde, hasta) {
   }
   for (const n of datos.notas) if (dentro(n.fecha)) dias.add(n.fecha);
   return dias.size;
+}
+
+/**
+ * ¿Caben tus metas semanales en tu tiempo? Suma las metas de los objetivos de tiempo semanales (de proyectos activos)
+ * y las compara con lo que Rumbo planifica en los próximos 7 días (70% de tus minutos libres, con ciclo de turnos y días especiales).
+ * `sobrecargada` cuando las metas piden más de lo planificable.
+ */
+export function cargaSemanal(datos, hoy) {
+  const activos = new Set(datos.proyectos.filter((p) => p.estado === 'activo').map((p) => p.id));
+  const metas = datos.objetivos.filter((o) => esRitmoSemanal(o) && !o.archivado && activos.has(o.proyectoId));
+  const demanda = metas.reduce((s, o) => s + o.minutosMeta, 0);
+  let capacidad = 0;
+  for (let i = 0; i < 7; i++) capacidad += capacidadDia(datos.disponibilidad, sumarDias(hoy, i));
+  return { demanda, capacidad, exceso: Math.max(0, demanda - capacidad), sobrecargada: demanda > capacidad, metas };
+}
+
+/**
+ * ¿Cuánto más (o menos) tardas de lo que estimas? Compara los minutos registrados en tareas terminadas con sus minutos
+ * estimados. Con menos de 4 tareas medibles no opina. `factor` 1,5 = tardas la mitad más.
+ */
+export function calibracionEstimaciones(datos) {
+  let real = 0;
+  let estimado = 0;
+  let n = 0;
+  for (const t of datos.tareas) {
+    if (!t.hecha || t.tamano === 'simple') continue;
+    const minutos = minutosTrabajados(datos, t.id);
+    if (minutos <= 0) continue;
+    real += minutos;
+    estimado += t.minutos;
+    n++;
+  }
+  if (n < 4 || !estimado) return null;
+  return { factor: real / estimado, n, real, estimado };
+}
+
+/** Todo lo de la pantalla «Mi avance»: esta semana contra la anterior, plan cumplido, metas, riesgos, carga y estimaciones. */
+export function avanceSemanal(datos, hoy) {
+  const desde = sumarDias(hoy, -6);
+  const previoDesde = sumarDias(desde, -7);
+  const previoHasta = sumarDias(desde, -1);
+  const min = (a, b) => datos.registros.filter((r) => r.fecha >= a && r.fecha <= b).reduce((s, r) => s + r.minutos, 0);
+  const terminadas = (a, b) => datos.tareas.filter((t) => t.hechaEl && t.hechaEl >= a && t.hechaEl <= b).length;
+  let aceptados = 0;
+  let hechos = 0;
+  for (const [fecha, plan] of Object.entries(datos.planes)) {
+    if (fecha < desde || fecha > hoy) continue;
+    aceptados += plan.items.length;
+    hechos += plan.items.filter((i) => i.hecho).length;
+  }
+  const proyectos = new Map(datos.proyectos.map((p) => [p.id, p]));
+  const objetivos = new Map(datos.objetivos.map((o) => [o.id, o]));
+  const porProyecto = new Map();
+  for (const r of datos.registros) {
+    if (r.fecha < desde || r.fecha > hoy) continue;
+    const p = proyectos.get(objetivos.get(r.objetivoId)?.proyectoId);
+    if (p) porProyecto.set(p.id, (porProyecto.get(p.id) ?? 0) + r.minutos);
+  }
+  const resumen = resumenSemana(datos, hoy);
+  const carga = cargaSemanal(datos, hoy);
+  return {
+    desde,
+    minutos: min(desde, hoy),
+    minutosPrevios: min(previoDesde, previoHasta),
+    terminadas: terminadas(desde, hoy),
+    terminadasPrevias: terminadas(previoDesde, previoHasta),
+    aceptados,
+    hechos,
+    diasConAvance: resumen.diasConAvance,
+    metas: carga.metas.map((o) => ({ objetivo: o, ...progresoObjetivo(o, datos, hoy) })),
+    enRiesgo: resumen.enRiesgo,
+    carga,
+    calibracion: calibracionEstimaciones(datos),
+    porProyecto: [...porProyecto.entries()].map(([id, minutos]) => ({ proyecto: proyectos.get(id), minutos })).sort((a, b) => b.minutos - a.minutos),
+  };
 }
 
 /** Mensaje de nuevo comienzo: lunes, día 1 del mes o regreso tras días fuera (efecto de nuevo comienzo). */
@@ -959,15 +1093,18 @@ export function tamanoPorMinutos(m) {
 /** Objetivo nuevo con todos sus campos (etapa 1, sin etapa anterior). */
 export function nuevoObjetivo(campos) {
   return {
-    tipo: 'resultado', plazo: null, minutosMeta: null, periodo: null, logrado: false,
+    tipo: 'resultado', plazo: null, minutosMeta: null, periodo: null, unidad: '', metaCantidad: null, minutosPorUnidad: null, logrado: false,
     criterio: '', anteriorId: null, archivado: false, etapa: 1, logradoEl: null, ...campos,
   };
 }
 
 /** Tarea nueva con todos sus campos. */
 export function nuevaTarea(campos) {
-  return { tamano: 'media', minutos: 60, plazo: null, pasos: [], hecha: false, hechaEl: null, tocado: null, ...campos };
+  return { tamano: 'media', minutos: 60, plazo: null, pasos: [], hecha: false, hechaEl: null, tocado: null, noAntesDe: null, esperando: '', ...campos };
 }
+
+/** Una tarea en espera (de una respuesta, de un trámite, de una fecha) no se recomienda hasta su fecha `noAntesDe`. */
+export const enEspera = (t, hoy) => !t.hecha && !!t.noAntesDe && t.noAntesDe > hoy;
 
 /**
  * Al terminar la última tarea de un objetivo de resultado, queda logrado: así no se celebra
@@ -1136,7 +1273,12 @@ export function erroresObjetivo(o, idsProyecto, objetivos = null) {
   if (o.tipo === 'tiempo') {
     if (!esEntero(o.minutosMeta, 5, LIMITES.metaMinutos)) e.push('la meta de tiempo debe ser de al menos 5 minutos');
     if (!PERIODOS.includes(o.periodo)) e.push('periodo no válido');
-  }
+    if (o.unidad !== undefined && o.unidad !== '') {
+      if (typeof o.unidad !== 'string' || o.unidad.length > LIMITES.unidad || !o.unidad.trim()) e.push('la unidad no es válida');
+      if (!esEntero(o.metaCantidad, 1, LIMITES.cantidad)) e.push('la meta de cantidad debe ser un entero de 1 a 10.000');
+      if (!esEntero(o.minutosPorUnidad, 1, 480)) e.push('los minutos por unidad deben ser de 1 a 480');
+    }
+  } else if (o.unidad) e.push('la unidad solo va en objetivos de tiempo');
   if (typeof o.logrado !== 'boolean') e.push('logrado no válido');
   if (!esFechaOpcional(o.logradoEl)) e.push('fecha de logro no válida');
   if (typeof o.criterio !== 'string' || o.criterio.length > LIMITES.criterio) e.push('la meta concreta es muy larga');
@@ -1165,6 +1307,8 @@ export function erroresTarea(t, objetivos) {
   if (typeof t.hecha !== 'boolean') e.push('hecha no válido');
   if (!esFechaOpcional(t.hechaEl)) e.push('fecha de término no válida');
   if (!esFechaOpcional(t.tocado)) e.push('fecha de avance no válida');
+  if (!esFechaOpcional(t.noAntesDe)) e.push('la fecha de espera no es válida');
+  if (t.esperando !== undefined && (typeof t.esperando !== 'string' || t.esperando.length > LIMITES.esperando)) e.push('lo que esperas es muy largo');
   if (!esFechaValida(t.creado)) e.push('fecha de creación no válida');
   return e;
 }
@@ -1219,7 +1363,7 @@ export function validarDatos(d) {
   const idsTarea = new Set(d.tareas.map((t) => t?.id));
 
   d.registros.forEach((r, i) => {
-    if (!r || !esId(r.id) || !esFechaValida(r.fecha) || !esEntero(r.minutos, 1, LIMITES.minutos) || !objetivos.has(r.objetivoId) || (r.tareaId != null && !idsTarea.has(r.tareaId))) {
+    if (!r || !esId(r.id) || !esFechaValida(r.fecha) || !esEntero(r.minutos, 1, LIMITES.minutos) || !objetivos.has(r.objetivoId) || (r.tareaId != null && !idsTarea.has(r.tareaId)) || (r.cantidad != null && !esEntero(r.cantidad, 1, LIMITES.cantidad))) {
       e.push(`Registro de tiempo ${i + 1}: no válido`);
     }
   });
@@ -1240,7 +1384,7 @@ export function validarDatos(d) {
       }
       plan.items.forEach((it, i) => {
         const ok = it && esId(it.id) && ['tarea', 'tiempo', 'planificar'].includes(it.tipo) && objetivos.has(it.objetivoId) && esEntero(it.minutos, 1, LIMITES.minutos) &&
-          typeof it.hecho === 'boolean' && (it.tipo !== 'tarea' || idsTarea.has(it.tareaId));
+          typeof it.hecho === 'boolean' && (it.tipo !== 'tarea' || idsTarea.has(it.tareaId)) && (it.cantidad == null || esEntero(it.cantidad, 1, LIMITES.cantidad));
         if (!ok) e.push(`Plan del ${fecha}, ítem ${i + 1}: no válido`);
       });
     }
@@ -1259,7 +1403,7 @@ export function validarDatos(d) {
   }
   const ciclo = disp?.ciclo;
   if (ciclo !== undefined && ciclo !== null && (
-    typeof ciclo !== 'object' || !esFechaValida(ciclo.inicio) || !Array.isArray(ciclo.minutos) ||
+    typeof ciclo !== 'object' || !esFechaValida(ciclo.inicio) || !esFechaOpcional(ciclo.desde) || !Array.isArray(ciclo.minutos) ||
     ciclo.minutos.length < CICLO_MIN || ciclo.minutos.length > CICLO_MAX || !ciclo.minutos.every((m) => esEntero(m, 0, LIMITES.minutos)) ||
     !Array.isArray(ciclo.nombres) || ciclo.nombres.length !== ciclo.minutos.length || !ciclo.nombres.every((n) => typeof n === 'string' && n.length <= LIMITES.nombreTurno)
   )) {

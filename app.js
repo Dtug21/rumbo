@@ -203,13 +203,20 @@ function marcarTerminada(d, t) {
   L.cerrarSiTerminado(d, t.objetivoId, f);
 }
 
-function completarItem(d, itemId, minutos) {
+/** `cantidad`: unidades hechas (solo en objetivos por conteo; si falta, sale de la sugerida o de los minutos). */
+function completarItem(d, itemId, minutos, cantidad = null) {
   const f = hoy();
   const plan = planEditable(d);
   const item = plan.items.find((i) => i.id === itemId);
+  const objetivo = buscar(d.objetivos, item.objetivoId);
   item.hecho = true;
   item.minutos = minutos;
-  d.registros.push({ id: crearId(), fecha: f, minutos, objetivoId: item.objetivoId, tareaId: item.tareaId ?? null });
+  const registro = { id: crearId(), fecha: f, minutos, objetivoId: item.objetivoId, tareaId: item.tareaId ?? null };
+  if (item.tipo === 'tiempo' && L.esConteo(objetivo)) {
+    registro.cantidad = cantidad ?? item.cantidad ?? Math.max(1, Math.round(minutos / objetivo.minutosPorUnidad));
+    item.cantidad = registro.cantidad;
+  }
+  d.registros.push(registro);
   if (item.tareaId) buscar(d.tareas, item.tareaId).tocado = f;
 }
 
@@ -322,12 +329,12 @@ function itemHtml(i) {
     const prog = L.progresoObjetivo(i.objetivo, datos, hoy());
     const periodo = i.objetivo.periodo === 'semana' ? 'esta semana' : 'en total';
     return `<li class="item${cerrado}">
-      <div class="item-cabeza"><h3>${esc(i.objetivo.nombre)}: ${dur(i.minutos)}</h3><span class="pct">${pct(prog.valor)}</span></div>
-      <div class="meta"><span>${esc(i.proyecto.nombre)}</span><span class="chip">${L.esRitmoSemanal(i.objetivo) ? 'Ritmo semanal' : 'Tiempo'}</span>${sesionHecha}</div>
+      <div class="item-cabeza"><h3>${tituloItem(i)}</h3><span class="pct">${pct(prog.valor)}</span></div>
+      <div class="meta"><span>${esc(i.proyecto.nombre)}</span><span class="chip">${L.esConteo(i.objetivo) ? 'Cantidad' : L.esRitmoSemanal(i.objetivo) ? 'Ritmo semanal' : 'Tiempo'}</span>${sesionHecha}</div>
       ${barra(prog.valor, `Avance de ${i.objetivo.nombre}`)}
-      <p class="ayuda">${dur(prog.minutos)} de ${dur(prog.meta)} ${periodo}</p>
+      <p class="ayuda">${L.esConteo(i.objetivo) ? `${esc(L.textoCantidad(i.objetivo, prog.cantidad))} de ${esc(L.textoCantidad(i.objetivo, prog.metaCantidad))} ${periodo}` : `${dur(prog.minutos)} de ${dur(prog.meta)} ${periodo}`}</p>
       ${i.hecho ? '' : `<div class="fila-botones">
-        ${boton('item-hecho', `Hecho: registrar ${dur(i.minutos)}`, { id: i.id, clase: 'chico primario' })}
+        ${boton('item-hecho', `Hecho: registrar ${etiquetaSesion(i)}`, { id: i.id, clase: 'chico primario' })}
         ${boton('item-cantidad', 'Hice otra cantidad', { id: i.id })}
         ${quitar}
       </div>`}
@@ -380,9 +387,18 @@ function itemHtml(i) {
   </li>`;
 }
 
+/** «1 h 30 min» o, en un objetivo por conteo, «2 postulaciones (50 min)». */
+function etiquetaSesion(i) {
+  if (i.tipo === 'tiempo' && L.esConteo(i.objetivo)) {
+    const n = i.cantidad ?? i.unidades ?? Math.max(1, Math.round(i.minutos / i.objetivo.minutosPorUnidad));
+    return `${L.textoCantidad(i.objetivo, n)} (${dur(i.minutos)})`;
+  }
+  return dur(i.minutos);
+}
+
 /** Título de un ítem del plan, para el historial. */
 function tituloItem(i) {
-  if (i.tipo === 'tiempo') return `${esc(i.objetivo.nombre)}: ${dur(i.minutos)}`;
+  if (i.tipo === 'tiempo') return `${esc(i.objetivo.nombre)}: ${esc(etiquetaSesion(i))}`;
   if (i.tipo === 'planificar') return `Planifica "${esc(i.objetivo.nombre)}"`;
   return esc(i.tarea.titulo);
 }
@@ -417,6 +433,60 @@ function semanaHtml(fechaActual) {
   </section>`;
 }
 
+/** Frase de carga: «Tus metas semanales piden 8 h y los próximos 7 días tienen 6 h planificables». */
+const textoCarga = (c) => `Tus metas semanales piden ${dur(c.demanda)} y los próximos 7 días tienen ${dur(c.capacidad)} planificables (el 70% de tu tiempo libre).`;
+
+/** «Mi avance»: esta semana contra la anterior, plan cumplido, metas, riesgos, carga y estimaciones. */
+function avanceHtml() {
+  const a = L.avanceSemanal(datos, hoy());
+  if (!datos.proyectos.length) return '';
+  const cambio = (ahora, antes, formato) => {
+    if (!antes && !ahora) return '<span class="ayuda">sin datos aún</span>';
+    if (!antes) return '<span class="ayuda">la semana anterior no hubo</span>';
+    const dif = ahora - antes;
+    return `<span class="ayuda">${dif === 0 ? 'igual que la semana anterior' : `${dif > 0 ? '+' : '−'}${formato(Math.abs(dif))} que la semana anterior`}</span>`;
+  };
+  const planPct = a.aceptados ? Math.round((a.hechos / a.aceptados) * 100) : null;
+  const stat = (num, texto, extra = '') => `<div class="avance-dato"><span class="stat-num">${num}</span><span class="stat-texto">${texto}</span>${extra}</div>`;
+  const metas = a.metas.length
+    ? `<h3 class="subtitulo">Tus metas de esta semana</h3><ul class="avance-metas">${a.metas
+      .map((m) => {
+        const conteo = L.esConteo(m.objetivo);
+        const txt = conteo ? `${L.textoCantidad(m.objetivo, m.cantidad)} de ${m.metaCantidad}` : `${dur(m.minutos)} de ${dur(m.meta)}`;
+        return `<li><div class="item-cabeza"><span>${esc(m.objetivo.nombre)}</span><span class="pct">${esc(txt)}</span></div>${barra(m.valor, `Meta semanal de ${m.objetivo.nombre}`, 'fina')}</li>`;
+      })
+      .join('')}</ul>`
+    : '';
+  const riesgos = a.enRiesgo.length
+    ? `<h3 class="subtitulo">Objetivos en riesgo</h3><ul class="lista-simple">${a.enRiesgo.map((x) => `<li><strong>${esc(x.objetivo.nombre)}</strong> <span class="ayuda">· plazo ${esc(fechaCorta(x.objetivo.plazo))}, falta ${Math.round(x.riesgo.falta * 100)}%</span></li>`).join('')}</ul>`
+    : '';
+  const porProyecto = a.porProyecto.length
+    ? `<h3 class="subtitulo">Dónde pusiste tu tiempo</h3><ul class="avance-metas">${a.porProyecto
+      .map((x) => `<li><div class="item-cabeza"><span>${esc(x.proyecto.nombre)}</span><span class="pct">${dur(x.minutos)}</span></div>${barra(x.minutos / a.minutos, `Tiempo en ${x.proyecto.nombre}`, 'fina')}</li>`)
+      .join('')}</ul>`
+    : '';
+  const carga = a.carga.sobrecargada
+    ? `<div class="aviso carga"><p><strong>Tus metas no caben en tu tiempo.</strong> ${esc(textoCarga(a.carga))} Baja una meta (Proyectos → el objetivo → Más → Editar) o pausa un proyecto.</p></div>`
+    : '';
+  const calibracion = a.calibracion
+    ? `<p class="ayuda">En tus ${a.calibracion.n} últimas tareas medianas y amplias tardaste ${a.calibracion.factor >= 1.15 ? `<strong>×${a.calibracion.factor.toFixed(1).replace('.', ',')} lo que estimaste</strong>. Al estimar, suma ese margen.` : a.calibracion.factor <= 0.85 ? `<strong>×${a.calibracion.factor.toFixed(1).replace('.', ',')} lo que estimaste</strong>: estimas de más, puedes ser más ajustado.` : 'más o menos lo que estimaste. Buena estimación.'}</p>`
+    : '';
+  return `<section class="tarjeta avance" aria-labelledby="avance-titulo">
+    <div class="item-cabeza"><h2 id="avance-titulo" class="titulo-tarjeta">Mi avance · últimos 7 días</h2></div>
+    <div class="avance-datos">
+      ${stat(dur(a.minutos), 'dedicados', cambio(a.minutos, a.minutosPrevios, dur))}
+      ${stat(a.terminadas, a.terminadas === 1 ? 'tarea terminada' : 'tareas terminadas', cambio(a.terminadas, a.terminadasPrevias, (n) => plural(n, 'tarea', 'tareas')))}
+      ${stat(planPct === null ? '—' : `${planPct}%`, 'de lo que aceptaste, hecho', `<span class="ayuda">${planPct === null ? 'aún no aceptas nada' : `${a.hechos} de ${a.aceptados}`}</span>`)}
+      ${stat(`${a.diasConAvance} de 7`, 'días con avance')}
+    </div>
+    ${carga}
+    ${metas}
+    ${riesgos}
+    ${porProyecto}
+    ${calibracion}
+  </section>`;
+}
+
 /** Historial: lo que planificaste, hiciste y anotaste un día anterior. Las notas se pueden seguir agregando. */
 function vistaDiaPasado(fecha) {
   const f = hoy();
@@ -436,6 +506,7 @@ function vistaDiaPasado(fecha) {
       <a class="boton chico" href="#/dia/${L.sumarDias(fecha, -1)}">‹ Día anterior</a>
       <a class="boton chico" href="${siguiente === f ? '#/hoy' : `#/dia/${siguiente}`}">${siguiente === f ? 'Hoy' : 'Día siguiente'} ›</a>
     </nav>
+    ${avanceHtml()}
     ${semanaHtml(fecha)}
     ${vacio ? '<p class="vacio">Ese día no registraste nada.</p>' : `
     <section class="tarjeta dia">
@@ -449,7 +520,7 @@ function vistaDiaPasado(fecha) {
 
 /** Título (ya escapado) de una recomendación. */
 function tituloRec(r) {
-  if (r.tipo === 'tiempo') return `Dedica ${dur(r.minutos)} a ${esc(r.objetivo.nombre)}`;
+  if (r.tipo === 'tiempo') return L.esConteo(r.objetivo) ? `${esc(r.objetivo.nombre)}: ${esc(L.textoCantidad(r.objetivo, r.unidades))}` : `Dedica ${dur(r.minutos)} a ${esc(r.objetivo.nombre)}`;
   if (r.tipo === 'planificar') return `Planifica "${esc(r.objetivo.nombre)}": define sus próximas tareas`;
   return esc(r.tarea.titulo);
 }
@@ -473,7 +544,7 @@ function recomendacionHtml(r) {
   let chip;
   let prog;
   if (r.tipo === 'tiempo') {
-    chip = `<span class="chip">${L.esRitmoSemanal(r.objetivo) ? 'Ritmo semanal' : 'Tiempo'}</span>`;
+    chip = `<span class="chip">${L.esConteo(r.objetivo) ? 'Cantidad' : L.esRitmoSemanal(r.objetivo) ? 'Ritmo semanal' : 'Tiempo'}</span>${L.esConteo(r.objetivo) ? `<span>${dur(r.minutos)}</span>` : ''}`;
     prog = L.progresoObjetivo(r.objetivo, datos, hoy()).valor;
   } else if (r.tipo === 'planificar') {
     chip = `<span class="chip">Planificar</span><span>${dur(r.minutos)}</span>`;
@@ -518,7 +589,7 @@ function botonesPendiente(i) {
   if (i.tipo === 'tarea' && i.tarea.tamano === 'simple') {
     return `${boton('terminar-tarea', `${icono('play')} Hecha: registrar ${dur(i.minutos)}`, { id: i.tarea.id, clase: 'boton-claro', etiqueta: `Marcar hecha ahora: ${nombre}` })}${verPlan}`;
   }
-  return `${boton('item-hecho', `${icono('play')} ${i.tipo === 'tiempo' ? 'Hecho' : 'Listo por hoy'}: registrar ${dur(i.minutos)}`, { id: i.id, clase: 'boton-claro', etiqueta: `Marcar listo ahora: ${nombre}` })}
+  return `${boton('item-hecho', `${icono('play')} ${i.tipo === 'tiempo' ? 'Hecho' : 'Listo por hoy'}: registrar ${etiquetaSesion(i)}`, { id: i.id, clase: 'boton-claro', etiqueta: `Marcar listo ahora: ${nombre}` })}
     ${boton('item-cantidad', 'Otra cantidad', { id: i.id, clase: 'boton-contorno', etiqueta: `Otra cantidad ahora: ${nombre}` })}${verPlan}`;
 }
 
@@ -535,6 +606,14 @@ function riesgoHtml(o) {
 
 /** "Para: <meta>" — recordar para qué sirve lo que vas a hacer ayuda a empezar. */
 const paraQue = (o) => (o?.criterio ? `<span class="para-que">Para: ${esc(o.criterio)}</span>` : '');
+
+/** Aviso (una vez por semana) cuando las metas semanales no caben en el tiempo planificable. */
+function avisoCarga_(f) {
+  const c = L.cargaSemanal(datos, f);
+  if (!c.sobrecargada || c.exceso < 30 || datos.meta.cargaAvisoSemana === L.inicioSemana(f)) return '';
+  return `<div class="aviso carga" role="status"><p><strong>Tus metas no caben en tu tiempo.</strong> ${esc(textoCarga(c))} Falta ${dur(c.exceso)}: baja una meta o pausa un proyecto.</p>
+    <div class="fila-botones"><a class="boton chico primario" href="#/dia">Ver mi avance</a>${boton('cerrar-carga', 'Entendido', { clase: 'chico' })}</div></div>`;
+}
 
 function vistaHoy() {
   const f = hoy();
@@ -614,6 +693,7 @@ function vistaHoy() {
       <p class="bajada">${esc(fechaLarga(f))}. Qué hacer hoy, y por qué.</p>${L.nuevoComienzo(f, diasAusente) ? `<p class="nuevo-comienzo">${esc(L.nuevoComienzo(f, diasAusente))}</p>` : ''}${momento}</div>
       <div class="fila-botones">${boton('anotar', `${icono('mas')} Anotar rápido`, { clase: 'primario', etiqueta: 'Anotar rápido' })}${boton('registrar-tiempo', `${icono('reloj')} Registrar tiempo`, { clase: '', etiqueta: 'Registrar tiempo' })}<a class="boton" href="#/dia/${L.sumarDias(f, -1)}">‹ Días anteriores</a></div></div>
     ${respaldo}
+    ${avisoCarga_(f)}
     ${regreso ? `<div class="aviso regreso" role="status"><p><strong>Qué bueno verte de vuelta.</strong> Pasaron ${diasAusente} días: no hay deuda que pagar. Arriba te dejo lo más corto para volver a arrancar.</p>${boton('cerrar-regreso', 'Gracias', { clase: 'chico' })}</div>` : ''}
     ${L.tocaRevisionSemanal(datos.meta, f) ? `<div class="aviso revision"><p><strong>Es ${L.diaSemana(f) === 0 ? 'domingo' : 'lunes'}: revisa tu semana.</strong> 5 minutos para ver lo logrado, decidir qué hacer con lo vencido y elegir tu foco.</p>${boton('revision', 'Revisar mi semana', { clase: 'chico primario' })}</div>` : ''}
     <div class="rejilla-hoy">
@@ -653,7 +733,7 @@ function vistaHoy() {
 function ritmosHtml(r) {
   return r.ritmos
     .map(
-      (x) => `<div class="ritmo"><div class="item-cabeza"><span>Ritmo semanal · ${esc(x.objetivo.nombre)}</span><span class="pct">${dur(x.minutos)} de ${dur(x.meta)}</span></div>
+      (x) => `<div class="ritmo"><div class="item-cabeza"><span>Ritmo semanal · ${esc(x.objetivo.nombre)}</span><span class="pct">${L.esConteo(x.objetivo) ? `${esc(L.textoCantidad(x.objetivo, x.cantidad))} de ${x.metaCantidad}` : `${dur(x.minutos)} de ${dur(x.meta)}`}</span></div>
         ${barra(x.valor, `Ritmo semanal de ${x.objetivo.nombre}`, 'fina')}</div>`,
     )
     .join('');
@@ -723,6 +803,7 @@ function tareaHtml(t) {
     t.pasos.length ? `<span>${hechos} de ${plural(t.pasos.length, 'paso', 'pasos')}</span>` : '',
     L.minutosTrabajados(datos, t.id) && !t.hecha ? tiempoTrabajado(t) : `<span>${dur(t.minutos)}</span>`,
     t.plazo && !t.hecha ? `<span class="${t.plazo < hoy() ? 'vencida' : ''}">${t.plazo < hoy() ? 'venció' : 'vence'} ${fechaCorta(t.plazo)}</span>` : '',
+    L.enEspera(t, hoy()) ? `<span class="chip espera">Esperando${t.esperando ? `: ${esc(t.esperando.length > 40 ? `${t.esperando.slice(0, 40)}…` : t.esperando)}` : ''} · vuelve el ${esc(fechaCorta(t.noAntesDe))}</span>` : '',
     t.hecha && t.hechaEl ? `<span>terminada el ${fechaCorta(t.hechaEl)}</span>` : '',
     faltan ? `<span class="chip falta">Falta algo</span>` : '',
     notas.length && !faltan ? `<span>${plural(notas.length, 'nota', 'notas')}</span>` : '',
@@ -748,6 +829,9 @@ function tareaHtml(t) {
           ${boton('nota-tarea', '+ Nota', { id: t.id, etiqueta: `Agregar nota a ${t.titulo}` })}
           ${menuMas(`t:${t.id}`, `Más opciones de ${t.titulo}`, [
             boton('editar-tarea', 'Editar', { id: t.id, etiqueta: `Editar: ${t.titulo}` }),
+            t.hecha ? '' : L.enEspera(t, hoy())
+              ? boton('retomar-tarea', 'Retomar ahora', { id: t.id, etiqueta: `Retomar ahora: ${t.titulo}` })
+              : boton('poner-espera', 'Poner en espera…', { id: t.id, etiqueta: `Poner en espera: ${t.titulo}` }),
             t.hecha ? '' : boton('tarea-subir', '↑ Antes', { id: t.id, etiqueta: `Hacer antes: ${t.titulo}` }),
             t.hecha ? '' : boton('tarea-bajar', '↓ Después', { id: t.id, etiqueta: `Hacer después: ${t.titulo}` }),
             boton('borrar-tarea', 'Borrar', { id: t.id, clase: 'chico peligro', etiqueta: `Borrar: ${t.titulo}` }),
@@ -785,8 +869,14 @@ function objetivoHtml(o) {
   let cuerpo;
   let logro = '';
   if (o.tipo === 'tiempo') {
-    detalle = `${dur(prog.minutos)} de ${dur(prog.meta)} ${o.periodo === 'semana' ? 'esta semana' : 'en total'}`;
-    cuerpo = `<div class="fila-botones">
+    const periodoTxt = o.periodo === 'semana' ? 'esta semana' : 'en total';
+    detalle = L.esConteo(o) ? `${L.textoCantidad(o, prog.cantidad)} de ${L.textoCantidad(o, prog.metaCantidad)} ${periodoTxt} · ${dur(prog.minutos)}` : `${dur(prog.minutos)} de ${dur(prog.meta)} ${periodoTxt}`;
+    cuerpo = L.esConteo(o)
+      ? `<div class="fila-botones">
+      ${[1, 2, 3].map((n) => boton('sumar-unidad', `+${n}`, { id: `${o.id}|${n}`, etiqueta: `Registrar ${L.textoCantidad(o, n)} en ${o.nombre}` })).join('')}
+      ${boton('otra-cantidad', 'Otra cantidad', { id: o.id })}
+    </div>`
+      : `<div class="fila-botones">
       ${[15, 30, 60].map((m) => boton('sumar-tiempo', `+${m} min`, { id: `${o.id}|${m}`, etiqueta: `Registrar ${m} minutos en ${o.nombre}` })).join('')}
       ${boton('otra-cantidad', 'Otra cantidad', { id: o.id })}
     </div>`;
@@ -814,7 +904,7 @@ function objetivoHtml(o) {
   return `<section class="tarjeta objetivo" aria-label="Objetivo: ${esc(o.nombre)}">
     <div class="item-cabeza"><h3 class="titulo-objetivo">${esc(o.nombre)}</h3><span class="pct grande">${pct(prog.valor)}</span></div>
     ${barra(prog.valor, `Avance del objetivo ${o.nombre}`, 'grande')}
-    <p class="meta"><span class="chip">${L.esRitmoSemanal(o) ? 'Ritmo semanal' : o.tipo === 'tiempo' ? 'Tiempo' : 'Resultado'}</span>${o.etapa > 1 ? `<span class="chip etapa">Etapa ${o.etapa}</span>` : ''}<span>${detalle}</span>${o.plazo ? `<span>plazo ${fechaCorta(o.plazo)}</span>` : ''}</p>
+    <p class="meta"><span class="chip">${L.esConteo(o) ? `Cantidad${L.esRitmoSemanal(o) ? ' semanal' : ''}` : L.esRitmoSemanal(o) ? 'Ritmo semanal' : o.tipo === 'tiempo' ? 'Tiempo' : 'Resultado'}</span>${o.etapa > 1 ? `<span class="chip etapa">Etapa ${o.etapa}</span>` : ''}<span>${detalle}</span>${o.plazo ? `<span>plazo ${fechaCorta(o.plazo)}</span>` : ''}</p>
     ${o.criterio ? `<p class="criterio"><strong>Meta:</strong> ${esc(o.criterio)}</p>` : ''}
     ${riesgoHtml(o)}
     ${logro}
@@ -910,6 +1000,10 @@ function vistaAjustes() {
       <details class="bloque"><summary>Cómo decide Rumbo</summary>
       <ul class="ayuda lista-ayuda">
         <li><strong>Orden:</strong> dentro de un objetivo, se recomiendan solo las 2 primeras tareas pendientes, en su orden (cámbialo con "Más ⋯ → ↑ Antes / ↓ Después"); en empate va primero la anterior. En objetivos de 3 o más tareas, la última (suele ser «Enviar» o «Entregar») espera a que las demás estén hechas. Una tarea posterior entra antes solo si tiene su propio plazo cercano.</li>
+        <li><strong>En espera:</strong> una tarea que depende de otros (una respuesta, un trámite) se puede poner «en espera» hasta una fecha (Más ⋯ → Poner en espera…). No se recomienda hasta ese día, no frena a las siguientes del objetivo, y al volver aparece con «Ya puedes retomarla».</li>
+        <li><strong>Por cantidad:</strong> un objetivo de tiempo puede contarse en unidades («5 postulaciones por semana») en vez de horas. Cada unidad cuenta además los minutos que sueles tomar en ella, para tu tiempo del día. Rumbo recomienda unidades enteras y las reparte en los días que quedan de la semana.</li>
+        <li><strong>Tus metas caben o no:</strong> Rumbo suma tus metas semanales y las compara con lo que planifica en los próximos 7 días (70% de tu tiempo libre, con tu ciclo de turnos). Si no caben, te avisa en Mi día, en «Mi avance» y en la revisión semanal.</li>
+        <li><strong>Mi avance:</strong> en Historial. Esta semana contra la anterior, cuánto de lo que aceptaste hiciste, tus metas semanales, objetivos en riesgo, dónde pusiste tu tiempo y cuánto más (o menos) tardas de lo que estimas.</li>
         <li><strong>Riesgo de plazo:</strong> en un objetivo de resultado con plazo, Rumbo compara lo que falta (en % del objetivo) con lo que avanzaste los últimos 7 días (pasos marcados, tareas terminadas y tiempo registrado) y lo que necesitas por semana para llegar. Dice «Vas en ritmo», «En riesgo» o «Plazo vencido». Un objetivo recién creado tiene unos días de margen antes de opinar. Es una estimación simple, no una predicción.</li>
         <li><strong>Objetivo logrado:</strong> al terminar su última tarea queda logrado solo (y se celebra). Si agregas o reabres una tarea, vuelve a estar en curso.</li>
         <li><strong>Motivación:</strong> al avanzar ves cuánto subió el proyecto y, al lograr un objetivo, una celebración (principio del progreso, Amabile y Kramer). Cerca de la meta (75% o más, o la última tarea), la tarea sube con "Te falta poco" (gradiente de meta, Kivetz y otros, 2006). La tarjeta verde recuerda para qué es ("Para: …"), y los lunes y el día 1 de cada mes hay mensaje de nuevo comienzo (Dai, Milkman y Riis, 2014). Sin puntos, medallas ni rachas que castiguen.</li>
@@ -955,9 +1049,10 @@ function cicloHtml(disp) {
     const dia = L.sumarDias(f, k);
     const c = L.diaDelCiclo(disp, dia);
     const especial = disp.excepciones[dia] !== undefined;
-    return `<li><span>${esc(etiquetaDia(dia))}: <strong>${esc(c.nombre || `día ${c.numero}`)}</strong></span><span>${dur(L.minutosLibres(disp, dia))}${especial ? ' · día especial' : ''}</span></li>`;
+    return `<li><span>${esc(etiquetaDia(dia))}: <strong>${c ? esc(c.nombre || `día ${c.numero}`) : 'semana fija'}</strong></span><span>${dur(L.minutosLibres(disp, dia))}${especial ? ' · día especial' : ''}</span></li>`;
   }).join('');
-  return `<p class="ayuda">Usas un <strong>ciclo de turnos de ${disp.ciclo.minutos.length} días</strong>. Rumbo recomienda hasta el 70% del tiempo libre de cada día. Tu semana fija queda guardada y vuelve si quitas el ciclo.</p>
+  const futuro = disp.ciclo.desde && disp.ciclo.desde > f;
+  return `<p class="ayuda">Usas un <strong>ciclo de turnos de ${disp.ciclo.minutos.length} días</strong>${futuro ? `, que <strong>empieza a regir el ${esc(fechaLarga(disp.ciclo.desde))}</strong>. Hasta entonces sigue tu semana fija` : disp.ciclo.desde ? `, vigente desde el ${esc(fechaCorta(disp.ciclo.desde))}` : ''}. Rumbo recomienda hasta el 70% del tiempo libre de cada día. Tu semana fija queda guardada y vuelve si quitas el ciclo.</p>
     <ul class="especiales ciclo-proximos" aria-label="Tus próximos 7 días">${dias}</ul>
     <div class="fila-botones">${boton('editar-ciclo', 'Editar mi ciclo', { clase: 'primario' })}${boton('quitar-ciclo', 'Volver a semana fija')}</div>`;
 }
@@ -967,21 +1062,31 @@ function dialogoCiclo() {
   let filas = actual
     ? actual.minutos.map((m, i) => ({ nombre: actual.nombres[i], minutos: m }))
     : L.CICLO_CUARTO_TURNO.minutos.map((m, i) => ({ nombre: L.CICLO_CUARTO_TURNO.nombres[i], minutos: m }));
-  let diaHoy = actual ? L.diaDelCiclo(datos.disponibilidad, hoy()).numero : 1;
+  const base = actual?.desde && actual.desde > hoy() ? actual.desde : hoy();
+  let diaHoy = actual ? (L.diaDelCiclo({ ciclo: { ...actual, desde: null } }, base)?.numero ?? 1) : 1;
   const form = abrirDialogo(
     'Mi ciclo de turnos',
     `<p class="ayuda">Escribe los días de tu ciclo en orden y cuánto tiempo libre real te queda en cada uno (fuera del turno, traslados y descanso). Parte con el 4º turno; ajústalo a tu realidad.</p>
      <div class="campo"><label for="ciclo-largo">¿Cuántos días dura tu ciclo?</label><select id="ciclo-largo">${Array.from({ length: L.CICLO_MAX - L.CICLO_MIN + 1 }, (_, k) => k + L.CICLO_MIN).map((k) => `<option value="${k}">${k} días</option>`).join('')}</select></div>
      <div data-filas></div>
-     <div class="campo"><label for="ciclo-hoy">¿Qué día de tu ciclo es hoy?</label><select id="ciclo-hoy" name="hoy"></select></div>`,
+     <div class="campos">
+       <div class="campo"><label for="ciclo-desde">Empieza a regir el</label><input id="ciclo-desde" name="desde" type="date" min="${hoy()}" value="${base}" required></div>
+       <div class="campo"><label for="ciclo-hoy">Ese día es el</label><select id="ciclo-hoy" name="hoy"></select></div>
+     </div>
+     <p class="ayuda">Si aún no empiezas turnos, pon la fecha de inicio: hasta entonces Rumbo sigue usando tu semana fija.</p>`,
     (fd) => {
       const nombres = filas.map((_, i) => String(fd.get(`n${i}`) ?? '').trim().slice(0, 30));
       const minutos = filas.map((_, i) => Number(fd.get(`m${i}`)));
       if (!minutos.every((m) => Number.isInteger(m) && m >= 0 && m <= 1440)) return 'Cada día debe tener minutos enteros de 0 a 1440.';
       const n = Number(fd.get('hoy'));
-      const ciclo = { inicio: L.sumarDias(hoy(), -(n - 1)), nombres, minutos };
+      const desde = String(fd.get('desde') ?? '');
+      if (!L.esFechaValida(desde) || desde < hoy()) return 'Elige hoy o una fecha futura para empezar.';
+      const ciclo = { inicio: L.sumarDias(desde, -(n - 1)), desde, nombres, minutos };
       marcarLibresTutorial();
-      cambiar((d) => (d.disponibilidad.ciclo = ciclo), `Ciclo guardado. Hoy es ${nombres[n - 1] || `el día ${n}`}: ${dur(minutos[n - 1])} libres.`);
+      const nombreDia = nombres[n - 1] || `el día ${n}`;
+      cambiar((d) => (d.disponibilidad.ciclo = ciclo), desde === hoy()
+        ? `Ciclo guardado. Hoy es ${nombreDia}: ${dur(minutos[n - 1])} libres.`
+        : `Ciclo guardado. Empieza a regir el ${fechaCorta(desde)} (${nombreDia}). Hasta entonces, tu semana fija.`);
     },
     'Guardar ciclo',
   );
@@ -1029,11 +1134,11 @@ function opcionesRegistro(seleccion = '') {
     .map((p) => {
       const opciones = [];
       for (const o of L.objetivosVisibles(datos, p.id)) {
-        if (o.tipo === 'tiempo') opciones.push([`o:${o.id}`, `${o.nombre} (tiempo)`]);
+        if (o.tipo === 'tiempo') opciones.push([`o:${o.id}`, `${o.nombre} (${L.esConteo(o) ? o.unidad : 'tiempo'})`, L.esConteo(o) ? o.unidad : '']);
         else if (!o.logrado) for (const t of L.tareasDe(datos, o.id).filter((x) => !x.hecha)) opciones.push([`t:${t.id}`, t.titulo]);
       }
       return opciones.length
-        ? `<optgroup label="${esc(p.nombre)}">${opciones.map(([v, n]) => `<option value="${esc(v)}"${v === seleccion ? ' selected' : ''}>${esc(n)}</option>`).join('')}</optgroup>`
+        ? `<optgroup label="${esc(p.nombre)}">${opciones.map(([v, n, u]) => `<option value="${esc(v)}"${u ? ` data-unidad="${esc(u)}"` : ''}${v === seleccion ? ' selected' : ''}>${esc(n)}</option>`).join('')}</optgroup>`
         : '';
     })
     .join('');
@@ -1053,12 +1158,13 @@ function dialogoRegistrar() {
   const opciones = opcionesRegistro(ultimo);
   if (!opciones) return avisar('Primero crea un objetivo o una tarea en tus proyectos.');
   const f = hoy();
-  abrirDialogo(
+  const form = abrirDialogo(
     'Registrar tiempo',
     `<p class="ayuda">Para lo que hiciste sin pasar por tu plan. ¿Estudiaste en Lumen? Escribe solo el total de la sesión: el detalle queda allá.</p>
      <div class="campo"><label for="r-destino">¿En qué trabajaste?</label><select id="r-destino" name="destino" required>${opciones}</select></div>
      <div class="campos">
-       <div class="campo"><label for="r-minutos">Minutos</label><input id="r-minutos" name="minutos" type="number" inputmode="numeric" min="1" max="1440" step="5" required value="30"></div>
+       <div class="campo" data-minutos><label for="r-minutos">Minutos</label><input id="r-minutos" name="minutos" type="number" inputmode="numeric" min="1" max="1440" step="5" required value="30"></div>
+       <div class="campo" data-cantidad hidden><label for="r-cantidad">Cantidad</label><input id="r-cantidad" name="cantidad" type="number" inputmode="numeric" min="1" max="500" step="1" value="1"></div>
        <div class="campo"><label for="r-fecha">Día</label><input id="r-fecha" name="fecha" type="date" max="${f}" value="${f}" required></div>
      </div>`,
     (fd) => {
@@ -1067,7 +1173,10 @@ function dialogoRegistrar() {
       const t = tipo === 't' ? buscar(datos.tareas, id) : null;
       const o = buscar(datos.objetivos, t ? t.objetivoId : id);
       if (!o) return 'Elige en qué trabajaste.';
-      const m = Number(fd.get('minutos'));
+      const conteo = !t && L.esConteo(o);
+      const cantidad = conteo ? Number(fd.get('cantidad')) : null;
+      if (conteo && (!Number.isInteger(cantidad) || cantidad < 1 || cantidad > 500)) return 'Escribe una cantidad entera, de 1 a 500.';
+      const m = conteo ? cantidad * o.minutosPorUnidad : Number(fd.get('minutos'));
       if (!Number.isInteger(m) || m < 1 || m > 1440) return 'Escribe minutos enteros, de 1 a 1440.';
       const fecha = String(fd.get('fecha') ?? '');
       if (!L.esFechaValida(fecha) || fecha > hoy()) return 'Elige hoy o un día anterior.';
@@ -1081,16 +1190,29 @@ function dialogoRegistrar() {
         : null;
       const nombre = t ? t.titulo : o.nombre;
       cambiar((d) => {
-        if (item) completarItem(d, item.id, m);
+        if (item) completarItem(d, item.id, m, cantidad);
         else {
-          d.registros.push({ id: crearId(), fecha, minutos: m, objetivoId: o.id, tareaId: t?.id ?? null });
+          const registro = { id: crearId(), fecha, minutos: m, objetivoId: o.id, tareaId: t?.id ?? null };
+          if (conteo) registro.cantidad = cantidad;
+          d.registros.push(registro);
           const tt = t && buscar(d.tareas, t.id);
           if (tt && (!tt.tocado || tt.tocado < fecha)) tt.tocado = fecha;
         }
-      }, `Registraste ${dur(m)} en "${nombre}"${fecha !== hoy() ? ` (${fechaCorta(fecha)})` : ''}${item ? ' y quedó hecho en tu plan' : ''}.`, { celebrar: o.proyectoId });
+      }, `Registraste ${conteo ? L.textoCantidad(o, cantidad) : dur(m)} en "${nombre}"${fecha !== hoy() ? ` (${fechaCorta(fecha)})` : ''}${item ? ' y quedó hecho en tu plan' : ''}.`, { celebrar: o.proyectoId });
     },
     'Registrar',
   );
+  // Si lo que registras se cuenta en unidades, se pide la cantidad (los minutos salen de lo que suele tomar cada una).
+  const $destino = form.querySelector('#r-destino');
+  const alternar = () => {
+    const unidad = $destino.selectedOptions[0]?.dataset.unidad;
+    form.querySelector('[data-minutos]').hidden = !!unidad;
+    form.querySelector('[data-cantidad]').hidden = !unidad;
+    form.querySelector('#r-minutos').required = !unidad;
+    if (unidad) form.querySelector('[for=r-cantidad]').textContent = `Cantidad de ${unidad}`;
+  };
+  $destino.addEventListener('change', alternar);
+  alternar();
 }
 
 // ---------- GUÍA ----------
@@ -1565,6 +1687,16 @@ function dialogoProyecto(p = null, plantilla = null, inicial = {}) {
   );
 }
 
+/** Campos de un objetivo de tiempo: en horas, o en unidades (con lo que suele tomar cada una). Los minutos de meta salen de ambos. */
+function camposTiempo(tipo, fd) {
+  if (tipo !== 'tiempo') return { minutosMeta: null, unidad: '', metaCantidad: null, minutosPorUnidad: null };
+  const unidad = String(fd.get('unidad') ?? '').trim().slice(0, 30);
+  if (!unidad) return { minutosMeta: Math.round(Number(fd.get('horas')) * 60), unidad: '', metaCantidad: null, minutosPorUnidad: null };
+  const metaCantidad = Number(fd.get('cantidad'));
+  const minutosPorUnidad = Number(fd.get('porunidad'));
+  return { minutosMeta: Math.round(metaCantidad * minutosPorUnidad), unidad, metaCantidad, minutosPorUnidad };
+}
+
 /**
  * Crear, editar o ampliar un objetivo.
  * - Nuevo: meta concreta ("¿cómo sabrás que lo lograste?") y, si es de resultado, las tareas para llegar (una por línea).
@@ -1583,7 +1715,7 @@ function dialogoObjetivo(proyectoId, o = null, primero = false, ampliarDe = null
       periodo: ampliarDe?.periodo ?? null,
       creado: hoy(),
     });
-  const horas = base.minutosMeta ? base.minutosMeta / 60 : 3;
+  const horas = base.minutosMeta && !L.esConteo(base) ? base.minutosMeta / 60 : 3;
   const pendientes = ampliarDe ? L.tareasDe(datos, ampliarDe.id).filter((t) => !t.hecha).length : 0;
   const faltantes = ampliarDe ? L.faltantesSueltos(datos, ampliarDe.id, { llevarPendientes: true }) : [];
   let titulo = nuevo ? 'Nuevo objetivo' : 'Editar objetivo';
@@ -1605,7 +1737,10 @@ function dialogoObjetivo(proyectoId, o = null, primero = false, ampliarDe = null
      <div class="campo"><label for="o-nombre">Nombre del objetivo</label><input id="o-nombre" name="nombre" maxlength="300" required value="${esc(base.nombre)}" placeholder="${ampliarDe ? 'Beta pública' : 'Lanzar la beta'}"></div>
      <div class="campo"><label for="o-criterio">¿Cómo sabrás que lo lograste? (opcional)</label><input id="o-criterio" name="criterio" maxlength="500" value="${esc(base.criterio)}" placeholder="20 enfermeras usándola cada semana"></div>
      <div class="campos solo-tiempo">
-       <div class="campo"><label for="o-horas">Meta en horas</label><input id="o-horas" name="horas" type="number" inputmode="decimal" min="0.25" max="1600" step="0.25" value="${horas}"></div>
+       <div class="campo campo-ancho"><label for="o-unidad">¿Lo cuentas en unidades? (opcional)</label><input id="o-unidad" name="unidad" maxlength="30" value="${esc(base.unidad ?? '')}" placeholder="postulaciones" autocomplete="off"><p class="ayuda">Por ejemplo «postulaciones» o «propuestas» (en plural). Si lo dejas vacío, se mide en horas.</p></div>
+       <div class="campo solo-horas"><label for="o-horas">Meta en horas</label><input id="o-horas" name="horas" type="number" inputmode="decimal" min="0.25" max="1600" step="0.25" value="${horas}"></div>
+       <div class="campo solo-unidades"><label for="o-cantidad">Meta en unidades</label><input id="o-cantidad" name="cantidad" type="number" inputmode="numeric" min="1" max="10000" step="1" value="${base.metaCantidad ?? 5}"></div>
+       <div class="campo solo-unidades"><label for="o-porunidad">Minutos por unidad</label><input id="o-porunidad" name="porunidad" type="number" inputmode="numeric" min="1" max="480" step="1" value="${base.minutosPorUnidad ?? 25}"></div>
        <div class="campo"><label for="o-periodo">Cada cuánto</label><select id="o-periodo" name="periodo"><option value="semana"${base.periodo !== 'total' ? ' selected' : ''}>Por semana</option><option value="total"${base.periodo === 'total' ? ' selected' : ''}>En total</option></select></div>
      </div>
      <div class="campo"><label for="o-plazo">Plazo (opcional)</label><input id="o-plazo" name="plazo" type="date" value="${esc(base.plazo ?? '')}"></div>
@@ -1626,7 +1761,7 @@ function dialogoObjetivo(proyectoId, o = null, primero = false, ampliarDe = null
         nombre: String(fd.get('nombre') ?? '').trim(),
         criterio: String(fd.get('criterio') ?? '').trim(),
         plazo: fd.get('plazo') || null,
-        minutosMeta: tipo === 'tiempo' ? Math.round(Number(fd.get('horas')) * 60) : null,
+        ...camposTiempo(tipo, fd),
         periodo: tipo === 'tiempo' ? fd.get('periodo') : null,
         logrado: tipo === 'tiempo' ? false : base.logrado,
       };
@@ -1650,7 +1785,11 @@ function dialogoObjetivo(proyectoId, o = null, primero = false, ampliarDe = null
     },
     ampliarDe ? 'Crear siguiente etapa' : nuevo ? 'Crear objetivo' : 'Guardar',
   );
-  const actualizar = () => form.classList.toggle('es-tiempo', form.querySelector('input[name=tipo]:checked')?.value === 'tiempo');
+  const actualizar = () => {
+    form.classList.toggle('es-tiempo', form.querySelector('input[name=tipo]:checked')?.value === 'tiempo');
+    form.classList.toggle('con-unidad', form.querySelector('#o-unidad').value.trim() !== '');
+  };
+  form.addEventListener('input', (e) => e.target.id === 'o-unidad' && actualizar());
   form.addEventListener('change', actualizar);
   actualizar();
   form.querySelector('#o-nombre').focus();
@@ -1692,6 +1831,8 @@ function dialogoTarea(objetivoId, t = null) {
   const o = buscar(datos.objetivos, t?.objetivoId ?? objetivoId);
   const base = t ?? L.nuevaTarea({ id: crearId(), objetivoId: o.id, titulo: '', creado: hoy() });
   const hermanos = datos.objetivos.filter((x) => x.proyectoId === o.proyectoId && x.tipo === 'resultado');
+  const calibracion = L.calibracionEstimaciones(datos);
+  const calibracionTarea = calibracion && (calibracion.factor >= 1.15 || calibracion.factor <= 0.85) ? calibracion : null;
   const form = abrirDialogo(
     nueva ? `Nueva tarea · ${o.nombre}` : 'Editar tarea',
     `${consejosHtml('tarea')}
@@ -1700,7 +1841,7 @@ function dialogoTarea(objetivoId, t = null) {
        ${opciones('tamano', Object.entries(L.TAMANOS).map(([k, v]) => [k, v.nombre, v.detalle]), base.tamano)}
      </fieldset>
      <div class="campos">
-       <div class="campo"><label for="t-minutos">Minutos estimados (total)</label><input id="t-minutos" name="minutos" type="number" inputmode="numeric" min="1" max="1440" step="5" required value="${base.minutos}"></div>
+       <div class="campo"><label for="t-minutos">Minutos estimados (total)</label><input id="t-minutos" name="minutos" type="number" inputmode="numeric" min="1" max="1440" step="5" required value="${base.minutos}">${calibracionTarea ? `<p class="ayuda">En tus últimas ${calibracionTarea.n} tareas tardaste ×${calibracionTarea.factor.toFixed(1).replace('.', ',')} lo estimado.</p>` : ''}</div>
        <div class="campo"><label for="t-plazo">Plazo (opcional)</label><input id="t-plazo" name="plazo" type="date" value="${esc(base.plazo ?? '')}"></div>
      </div>
      ${!nueva && hermanos.length > 1 ? `<div class="campo"><label for="t-objetivo">Objetivo</label><select id="t-objetivo" name="objetivoId">${hermanos.map((x) => `<option value="${esc(x.id)}"${x.id === base.objetivoId ? ' selected' : ''}>${esc(x.nombre)}</option>`).join('')}</select></div>` : ''}
@@ -1740,6 +1881,43 @@ function dialogoTarea(objetivoId, t = null) {
   form.addEventListener('change', (e) => {
     if (e.target.name === 'tamano' && !minutosTocados) $min.value = L.TAMANOS[e.target.value].minutos;
   });
+}
+
+/** Poner una tarea en espera: no se recomienda hasta la fecha elegida, y las siguientes del objetivo pueden avanzar. */
+function dialogoEspera(t) {
+  const sugerida = L.sumarDias(hoy(), 3);
+  abrirDialogo(
+    `En espera: ${t.titulo}`,
+    `<p class="ayuda">Úsalo cuando depende de otra persona o de una fecha (una respuesta, un trámite, «una semana después de enviar»). No te la recomendaré hasta ese día, y las siguientes tareas del objetivo pueden avanzar.</p>
+     <div class="campo"><label for="e-que">¿Qué esperas? (opcional)</label><input id="e-que" name="que" maxlength="120" autocomplete="off" value="${esc(t.esperando ?? '')}" placeholder="Respuesta de las 2 personas a las que pedí referencia"></div>
+     <div class="campo"><label for="e-fecha">Volver a mirarla el</label><input id="e-fecha" name="fecha" type="date" min="${L.sumarDias(hoy(), 1)}" value="${esc(L.enEspera(t, hoy()) ? t.noAntesDe : sugerida)}" required></div>`,
+    (fd) => {
+      const fecha = String(fd.get('fecha') ?? '');
+      if (!L.esFechaValida(fecha) || fecha <= hoy()) return 'Elige una fecha futura.';
+      const que = String(fd.get('que') ?? '').trim().slice(0, 120);
+      cambiar((d) => {
+        const x = buscar(d.tareas, t.id);
+        x.noAntesDe = fecha;
+        x.esperando = que;
+      }, `En espera hasta el ${fechaCorta(fecha)}. Te la vuelvo a mostrar ese día.`);
+    },
+    'Poner en espera',
+  );
+}
+
+/** Cuántas unidades hiciste (objetivos por conteo). Los minutos salen de lo que suele tomar cada una. */
+function dialogoCantidad(o, defecto, alGuardar) {
+  abrirDialogo(
+    `Registrar en "${o.nombre}"`,
+    `<div class="campo"><label for="c-cantidad">¿Cuántas ${esc(o.unidad)}?</label><input id="c-cantidad" name="cantidad" type="number" inputmode="numeric" min="1" max="500" step="1" required value="${defecto}"></div>
+     <p class="ayuda">Cuento ${dur(o.minutosPorUnidad)} por ${esc(L.unidadSingular(o.unidad))}, para tu tiempo del día.</p>`,
+    (fd) => {
+      const n = Number(fd.get('cantidad'));
+      if (!Number.isInteger(n) || n < 1 || n > 500) return 'Escribe un número entero, de 1 a 500.';
+      alGuardar(n);
+    },
+    'Registrar',
+  );
 }
 
 function dialogoMinutos(titulo, defecto, alGuardar) {
@@ -1953,6 +2131,7 @@ function dialogoRevision() {
        .map((x) => `<li><span><strong>${esc(x.objetivo.nombre)}</strong> <span class="ayuda">· plazo ${esc(fechaCorta(x.objetivo.plazo))}, falta ${Math.round(x.riesgo.falta * 100)}%</span></span><span class="acciones-nota">
          ${boton('mover-plazo', 'Mover', { id: `objetivo|${x.objetivo.id}`, clase: 'chico', etiqueta: `Mover plazo: ${x.objetivo.nombre}` })}</span></li>`)
        .join('')}</ul>` : ''}
+     ${L.cargaSemanal(datos, f).sobrecargada ? `<p class="ayuda"><strong>Tus metas no caben:</strong> ${esc(textoCarga(L.cargaSemanal(datos, f)))} Conviene bajar una.</p>` : ''}
      ${r.olvidados.length ? `<p class="ayuda">Sin avance hace 7 días o más: ${r.olvidados.map((p) => esc(p.nombre)).join(', ')}. Si no es su momento, pausarlo (en Editar proyecto) también es decidir.</p>` : ''}
      ${r.porOrdenar ? `<p class="ayuda">Tienes ${plural(r.porOrdenar, 'cosa', 'cosas')} en «Por ordenar»: están arriba en Mi día.</p>` : ''}
 
@@ -2126,7 +2305,9 @@ const acciones = {
     const r = [...v.recomendaciones, v.extra].find((x) => x?.clave === clave);
     if (!r) return;
     cambiar((d) => {
-      planEditable(d).items.push({ id: crearId(), tipo: r.tipo, tareaId: r.tarea?.id ?? null, objetivoId: r.objetivo.id, minutos: r.minutos, hecho: false });
+      const item = { id: crearId(), tipo: r.tipo, tareaId: r.tarea?.id ?? null, objetivoId: r.objetivo.id, minutos: r.minutos, hecho: false };
+      if (r.unidades) item.cantidad = r.unidades;
+      planEditable(d).items.push(item);
     }, 'Agregado a tu plan de hoy.');
   },
   otra: (clave) => cambiar((d) => planEditable(d).descartadas.push(clave), 'Te muestro otra.'),
@@ -2136,10 +2317,16 @@ const acciones = {
   },
   'item-hecho': (id) => {
     const item = L.planDeHoy(datos, hoy()).items.find((i) => i.id === id);
-    cambiar((d) => completarItem(d, id, item.minutos), `Registraste ${dur(item.minutos)}.`, { celebrar: proyectoDe(item) });
+    const o = buscar(datos.objetivos, item.objetivoId);
+    const mensaje = item.tipo === 'tiempo' && L.esConteo(o) ? `Registraste ${L.textoCantidad(o, item.cantidad ?? Math.max(1, Math.round(item.minutos / o.minutosPorUnidad)))}.` : `Registraste ${dur(item.minutos)}.`;
+    cambiar((d) => completarItem(d, id, item.minutos), mensaje, { celebrar: proyectoDe(item) });
   },
   'item-cantidad': (id) => {
     const item = L.planDeHoy(datos, hoy()).items.find((i) => i.id === id);
+    const o = buscar(datos.objetivos, item.objetivoId);
+    if (item.tipo === 'tiempo' && L.esConteo(o)) {
+      return dialogoCantidad(o, item.cantidad ?? 1, (n) => cambiar((d) => completarItem(d, id, n * o.minutosPorUnidad, n), `Registraste ${L.textoCantidad(o, n)}.`, { celebrar: o.proyectoId }));
+    }
     dialogoMinutos('¿Cuántos minutos le dedicaste?', item.minutos, (m) => cambiar((d) => completarItem(d, id, m), `Registraste ${dur(m)}.`, { celebrar: proyectoDe(item) }));
   },
   'item-quitar': (id) => cambiar((d) => {
@@ -2196,8 +2383,17 @@ const acciones = {
     const o = buscar(datos.objetivos, id);
     cambiar((d) => d.registros.push({ id: crearId(), fecha: hoy(), minutos: Number(m), objetivoId: id, tareaId: null }), `Registraste ${m} min en "${o.nombre}".`, { celebrar: o.proyectoId });
   },
+  'sumar-unidad': (valor) => {
+    const [id, n] = valor.split('|');
+    const o = buscar(datos.objetivos, id);
+    const cantidad = Number(n);
+    cambiar((d) => d.registros.push({ id: crearId(), fecha: hoy(), minutos: cantidad * o.minutosPorUnidad, objetivoId: id, tareaId: null, cantidad }), `Registraste ${L.textoCantidad(o, cantidad)} en "${o.nombre}".`, { celebrar: o.proyectoId });
+  },
   'otra-cantidad': (id) => {
     const o = buscar(datos.objetivos, id);
+    if (L.esConteo(o)) {
+      return dialogoCantidad(o, 1, (n) => cambiar((d) => d.registros.push({ id: crearId(), fecha: hoy(), minutos: n * o.minutosPorUnidad, objetivoId: id, tareaId: null, cantidad: n }), `Registraste ${L.textoCantidad(o, n)} en "${o.nombre}".`, { celebrar: o.proyectoId }));
+    }
     dialogoMinutos(`Registrar tiempo en "${o.nombre}"`, 45, (m) =>
       cambiar((d) => d.registros.push({ id: crearId(), fecha: hoy(), minutos: m, objetivoId: id, tareaId: null }), `Registraste ${dur(m)} en "${o.nombre}".`, { celebrar: o.proyectoId }),
     );
@@ -2247,6 +2443,7 @@ const acciones = {
   },
 
   // Regreso, revisión, momento y números
+  'cerrar-carga': () => cambiar((d) => (d.meta.cargaAvisoSemana = L.inicioSemana(hoy()))),
   'cerrar-regreso': () => {
     bienvenidaVista = true;
     render();
@@ -2288,6 +2485,12 @@ const acciones = {
 
   // Tareas
   'nueva-tarea': (objetivoId) => dialogoTarea(objetivoId),
+  'poner-espera': (id) => dialogoEspera(buscar(datos.tareas, id)),
+  'retomar-tarea': (id) => cambiar((d) => {
+    const x = buscar(d.tareas, id);
+    x.noAntesDe = null;
+    x.esperando = '';
+  }, 'Retomada: vuelve a recomendarse.'),
   'editar-tarea': (id) => dialogoTarea(null, buscar(datos.tareas, id)),
   'borrar-tarea': (id) => cambiar((d) => {
     d.tareas = d.tareas.filter((t) => t.id !== id);

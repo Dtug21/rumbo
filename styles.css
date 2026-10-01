@@ -606,3 +606,22 @@ body.con-tutorial .toast { top: calc(0.75rem + env(safe-area-inset-top)); bottom
 .riesgo-alto .riesgo-chip, .riesgo.vencido .riesgo-chip { background: color-mix(in srgb, var(--peligro) 14%, var(--superficie)); color: var(--peligro); }
 .riesgo.ok { color: var(--texto); }
 .texto-riesgo { color: var(--peligro); }
+
+/* Tareas en espera */
+.chip.espera { background: color-mix(in srgb, var(--acento) 16%, var(--superficie)); color: var(--texto); border-color: color-mix(in srgb, var(--acento) 50%, transparent); }
+
+/* Objetivos por cantidad */
+form .solo-unidades { display: none; }
+form.es-tiempo.con-unidad .solo-unidades { display: block; }
+form.es-tiempo.con-unidad .solo-horas { display: none; }
+.campo-ancho { grid-column: 1 / -1; }
+
+/* Mi avance */
+.avance { margin: 0 0 1.25rem; }
+.avance-datos { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem 1rem; margin: 0.75rem 0 0.5rem; }
+@media (min-width: 900px) { .avance-datos { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.avance-dato { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
+.avance-dato .stat-num { font-size: 1.6rem; font-weight: 800; line-height: 1.1; }
+.avance-metas { list-style: none; padding: 0; margin: 0.25rem 0 0.5rem; display: grid; gap: 0.6rem; }
+.aviso.carga { background: var(--aviso-fondo); }
+.aviso.carga .fila-botones { margin-top: 0.5rem; }
