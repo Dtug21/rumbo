@@ -200,7 +200,7 @@ function marcarTerminada(d, t) {
   const plan = L.planDeHoy(d, f);
   const item = plan.items.find((i) => i.tareaId === t.id && !i.hecho);
   if (item) completarItem(d, item.id, item.minutos);
-  L.cerrarSiTerminado(d, t.objetivoId);
+  L.cerrarSiTerminado(d, t.objetivoId, f);
 }
 
 function completarItem(d, itemId, minutos) {
@@ -522,6 +522,17 @@ function botonesPendiente(i) {
     ${boton('item-cantidad', 'Otra cantidad', { id: i.id, clase: 'boton-contorno', etiqueta: `Otra cantidad ahora: ${nombre}` })}${verPlan}`;
 }
 
+/** Chip y explicación del riesgo de plazo de un objetivo (null si no aplica). Todo en % del objetivo, por semana. */
+function riesgoHtml(o) {
+  const r = L.riesgoPlazo(o, datos, hoy());
+  if (!r) return '';
+  const cuanto = (x) => `${Math.max(1, Math.round(x * 100))}%`;
+  if (r.estado === 'vencido') return `<p class="riesgo vencido"><span class="chip riesgo-chip">Plazo vencido</span> Falta ${cuanto(r.falta)}. Mueve el plazo o decide cómo seguir.</p>`;
+  if (r.estado === 'sin-ritmo') return `<p class="riesgo"><span class="chip">Recién empieza</span> Faltan ${plural(r.dias, 'día', 'días')}. Para llegar, ${r.necesario >= 1 ? 'tendrías que terminarlo todo en estos días' : `necesitas avanzar ~${cuanto(r.necesario)} por semana`}.</p>`;
+  if (r.estado === 'en-ritmo') return `<p class="riesgo ok"><span class="chip riesgo-chip">Vas en ritmo</span> Avanzaste ${cuanto(r.lleva)} esta semana y necesitas ~${cuanto(r.necesario)} para llegar (${plural(r.dias, 'día', 'días')}).</p>`;
+  return `<p class="riesgo riesgo-alto"><span class="chip riesgo-chip">En riesgo</span> Faltan ${plural(r.dias, 'día', 'días')} y falta ${cuanto(r.falta)}: ${r.necesario >= 1 ? 'tendrías que terminarlo todo en estos días' : `necesitas avanzar ~${cuanto(r.necesario)} por semana`} y esta semana llevas ${r.lleva ? cuanto(r.lleva) : '0%'}. Acepta algo de este objetivo hoy o mueve el plazo.</p>`;
+}
+
 /** "Para: <meta>" — recordar para qué sirve lo que vas a hacer ayuda a empezar. */
 const paraQue = (o) => (o?.criterio ? `<span class="para-que">Para: ${esc(o.criterio)}</span>` : '');
 
@@ -650,11 +661,12 @@ function ritmosHtml(r) {
 
 function tarjetaProyecto(p) {
   const r = L.resumenProyecto(p, datos, hoy());
+  const enRiesgo = p.estado === 'activo' ? L.objetivosVisibles(datos, p.id).filter((o) => ['en-riesgo', 'vencido'].includes(L.riesgoPlazo(o, datos, hoy())?.estado)).length : 0;
   return `<li><a class="proyecto-tarjeta${p.estado !== 'activo' ? ' apagado' : ''}" href="#/proyecto/${encodeURIComponent(p.id)}">
     <div class="item-cabeza"><h3>${esc(p.nombre)}</h3>${r.progreso === null ? '' : `<span class="pct grande">${pct(r.progreso)}</span>`}</div>
     ${r.progreso === null ? '' : barra(r.progreso, `Avance de ${p.nombre}`, 'grande')}
     ${ritmosHtml(r)}
-    <p class="ayuda">${plural(r.objetivos, 'objetivo', 'objetivos')}${r.etapasLogradas ? ` · ${plural(r.etapasLogradas, 'etapa lograda', 'etapas logradas')}` : ''} · ${plural(r.tareasPendientes, 'tarea pendiente', 'tareas pendientes')} · último avance ${haceDias(r.diasSinAvance)}${p.estado !== 'activo' ? ` · ${ETIQUETA_ESTADO[p.estado].toLowerCase()}` : ''}</p>
+    <p class="ayuda">${plural(r.objetivos, 'objetivo', 'objetivos')}${r.etapasLogradas ? ` · ${plural(r.etapasLogradas, 'etapa lograda', 'etapas logradas')}` : ''} · ${plural(r.tareasPendientes, 'tarea pendiente', 'tareas pendientes')} · último avance ${haceDias(r.diasSinAvance)}${p.estado !== 'activo' ? ` · ${ETIQUETA_ESTADO[p.estado].toLowerCase()}` : ''}${enRiesgo ? ` · <strong class="texto-riesgo">${plural(enRiesgo, 'objetivo en riesgo', 'objetivos en riesgo')}</strong>` : ''}</p>
   </a></li>`;
 }
 
@@ -804,6 +816,7 @@ function objetivoHtml(o) {
     ${barra(prog.valor, `Avance del objetivo ${o.nombre}`, 'grande')}
     <p class="meta"><span class="chip">${L.esRitmoSemanal(o) ? 'Ritmo semanal' : o.tipo === 'tiempo' ? 'Tiempo' : 'Resultado'}</span>${o.etapa > 1 ? `<span class="chip etapa">Etapa ${o.etapa}</span>` : ''}<span>${detalle}</span>${o.plazo ? `<span>plazo ${fechaCorta(o.plazo)}</span>` : ''}</p>
     ${o.criterio ? `<p class="criterio"><strong>Meta:</strong> ${esc(o.criterio)}</p>` : ''}
+    ${riesgoHtml(o)}
     ${logro}
     ${cuerpo}
     ${notas.length ? `<h4 class="subtitulo-chico">Notas del objetivo</h4>${notasHtml(notas)}` : ''}
@@ -897,6 +910,7 @@ function vistaAjustes() {
       <details class="bloque"><summary>Cómo decide Rumbo</summary>
       <ul class="ayuda lista-ayuda">
         <li><strong>Orden:</strong> dentro de un objetivo, se recomiendan solo las 2 primeras tareas pendientes, en su orden (cámbialo con "Más ⋯ → ↑ Antes / ↓ Después"); en empate va primero la anterior. En objetivos de 3 o más tareas, la última (suele ser «Enviar» o «Entregar») espera a que las demás estén hechas. Una tarea posterior entra antes solo si tiene su propio plazo cercano.</li>
+        <li><strong>Riesgo de plazo:</strong> en un objetivo de resultado con plazo, Rumbo compara lo que falta (en % del objetivo) con lo que avanzaste los últimos 7 días (pasos marcados, tareas terminadas y tiempo registrado) y lo que necesitas por semana para llegar. Dice «Vas en ritmo», «En riesgo» o «Plazo vencido». Un objetivo recién creado tiene unos días de margen antes de opinar. Es una estimación simple, no una predicción.</li>
         <li><strong>Objetivo logrado:</strong> al terminar su última tarea queda logrado solo (y se celebra). Si agregas o reabres una tarea, vuelve a estar en curso.</li>
         <li><strong>Motivación:</strong> al avanzar ves cuánto subió el proyecto y, al lograr un objetivo, una celebración (principio del progreso, Amabile y Kramer). Cerca de la meta (75% o más, o la última tarea), la tarea sube con "Te falta poco" (gradiente de meta, Kivetz y otros, 2006). La tarjeta verde recuerda para qué es ("Para: …"), y los lunes y el día 1 de cada mes hay mensaje de nuevo comienzo (Dai, Milkman y Riis, 2014). Sin puntos, medallas ni rachas que castiguen.</li>
         <li><strong>Foco de la semana:</strong> los objetivos que eliges en la revisión semanal suben en las recomendaciones esa semana.</li>
@@ -1623,7 +1637,7 @@ function dialogoObjetivo(proyectoId, o = null, primero = false, ampliarDe = null
       const mensaje = ampliarDe ? `Etapa ${ampliarDe.etapa + 1} creada.` : nuevo ? 'Objetivo creado.' : 'Objetivo guardado.';
       cambiar((d) => {
         if (ampliarDe) {
-          L.ampliarObjetivo(d, ampliarDe.id, objetivo, { llevarPendientes: !!fd.get('llevar'), faltantesComoTareas: !!fd.get('faltantes'), crearId });
+          L.ampliarObjetivo(d, ampliarDe.id, objetivo, { llevarPendientes: !!fd.get('llevar'), faltantesComoTareas: !!fd.get('faltantes'), crearId, fecha: hoy() });
         }
         else if (nuevo) {
           d.objetivos.push(objetivo);
@@ -1935,6 +1949,10 @@ function dialogoRevision() {
          ${boton('mover-plazo', 'Mover', { id: `${x.tipo}|${x.id}`, clase: 'chico', etiqueta: `Mover plazo: ${x.nombre}` })}
          ${boton('quitar-plazo', 'Quitar', { id: `${x.tipo}|${x.id}`, clase: 'chico plano', etiqueta: `Quitar plazo: ${x.nombre}` })}</span></li>`)
        .join('')}</ul>` : '<p class="ayuda">Nada vencido. Bien.</p>'}
+     ${r.enRiesgo.length ? `<p class="ayuda"><strong>No llegas a su plazo al ritmo de esta semana:</strong></p><ul class="lista-revision">${r.enRiesgo
+       .map((x) => `<li><span><strong>${esc(x.objetivo.nombre)}</strong> <span class="ayuda">· plazo ${esc(fechaCorta(x.objetivo.plazo))}, falta ${Math.round(x.riesgo.falta * 100)}%</span></span><span class="acciones-nota">
+         ${boton('mover-plazo', 'Mover', { id: `objetivo|${x.objetivo.id}`, clase: 'chico', etiqueta: `Mover plazo: ${x.objetivo.nombre}` })}</span></li>`)
+       .join('')}</ul>` : ''}
      ${r.olvidados.length ? `<p class="ayuda">Sin avance hace 7 días o más: ${r.olvidados.map((p) => esc(p.nombre)).join(', ')}. Si no es su momento, pausarlo (en Editar proyecto) también es decidir.</p>` : ''}
      ${r.porOrdenar ? `<p class="ayuda">Tienes ${plural(r.porOrdenar, 'cosa', 'cosas')} en «Por ordenar»: están arriba en Mi día.</p>` : ''}
 
@@ -2155,6 +2173,7 @@ const acciones = {
   logrado: (id) => cambiar((d) => {
     const o = buscar(d.objetivos, id);
     o.logrado = !o.logrado;
+    o.logradoEl = o.logrado ? hoy() : null;
   }, buscar(datos.objetivos, id).logrado ? 'Objetivo reabierto.' : 'Objetivo logrado.', { celebrar: proyectoDe({ objetivoId: id }) }),
   'borrar-objetivo': (id) => {
     const o = buscar(datos.objetivos, id);
@@ -2481,7 +2500,9 @@ document.addEventListener('change', (e) => {
     $toast.hidden = true; // así no se mezcla con un aviso anterior
     cambiar((d) => {
       const t = buscar(d.tareas, tareaId);
-      buscar(t.pasos, pasoId).hecho = marcado;
+      const paso = buscar(t.pasos, pasoId);
+      paso.hecho = marcado;
+      paso.hechoEl = marcado ? hoy() : null;
       t.tocado = hoy();
       if (t.pasos.every((p) => p.hecho) && !t.hecha) {
         marcarTerminada(d, t);

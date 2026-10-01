@@ -599,3 +599,10 @@ body.con-tutorial .toast { top: calc(0.75rem + env(safe-area-inset-top)); bottom
 .lista-bandeja li { flex-wrap: wrap; }
 .lista-bandeja li > span:first-child { flex: 1 1 11rem; min-width: 0; }
 .lista-bandeja .acciones-nota { margin-left: auto; }
+
+/* Riesgo de plazo */
+.riesgo { margin: 0.5rem 0; font-size: 0.92rem; display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.riesgo-chip { background: var(--menta); color: var(--verde-texto); font-weight: 700; }
+.riesgo-alto .riesgo-chip, .riesgo.vencido .riesgo-chip { background: color-mix(in srgb, var(--peligro) 14%, var(--superficie)); color: var(--peligro); }
+.riesgo.ok { color: var(--texto); }
+.texto-riesgo { color: var(--peligro); }

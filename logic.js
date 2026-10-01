@@ -200,6 +200,51 @@ export function progresoObjetivo(o, datos, hoy) {
 }
 
 /**
+ * Cuánto avanzó una tarea (0 a 1) entre `desde` y hoy, con las fechas que guarda Rumbo:
+ * pasos marcados (`hechoEl`), el cierre de la tarea (`hechaEl`) y, sin pasos, el tiempo registrado.
+ */
+export function avanceDeTareaEnVentana(t, datos, desde) {
+  const n = t.pasos.length;
+  const cierra = t.hecha && t.hechaEl && t.hechaEl >= desde;
+  if (!n) {
+    if (cierra) return 1;
+    if (t.hecha) return 0;
+    const minutos = datos.registros.filter((r) => r.tareaId === t.id && r.fecha >= desde).reduce((s, r) => s + r.minutos, 0);
+    return Math.min(TOPE_POR_TIEMPO, minutos / t.minutos);
+  }
+  let avance = t.pasos.filter((p) => p.hecho && p.hechoEl && p.hechoEl >= desde).length / n;
+  // Al cerrarla, lo que quedaba (pasos sin marcar o sin fecha, de respaldos antiguos) cuenta en ese día.
+  if (cierra) avance += t.pasos.filter((p) => !p.hechoEl).length / n;
+  return Math.min(1, avance);
+}
+
+/**
+ * ¿Llegas al plazo de un objetivo de resultado al ritmo de los últimos 7 días?
+ * Compara lo que falta (en % del objetivo) con lo que avanzaste esta última semana.
+ * Devuelve null si no aplica (sin plazo, logrado, de tiempo o archivado).
+ * estado: 'vencido' | 'en-ritmo' | 'en-riesgo' | 'sin-ritmo' (aún no hay semana de datos para opinar).
+ */
+export function riesgoPlazo(o, datos, hoy) {
+  if (o.tipo !== 'resultado' || o.logrado || o.archivado || !o.plazo) return null;
+  const tareas = tareasDe(datos, o.id);
+  if (!tareas.length) return null;
+  const dias = diasEntre(hoy, o.plazo);
+  const falta = 1 - progresoObjetivo(o, datos, hoy).valor;
+  if (falta <= 0.0001) return null;
+  if (dias < 0) return { estado: 'vencido', dias, falta, necesario: null, lleva: 0 };
+  const desde = sumarDias(hoy, -6);
+  const pesoTotal = tareas.reduce((s, t) => s + TAMANOS[t.tamano].peso, 0);
+  const lleva = pesoTotal ? tareas.reduce((s, t) => s + TAMANOS[t.tamano].peso * avanceDeTareaEnVentana(t, datos, desde), 0) / pesoTotal : 0;
+  const necesario = (falta / Math.max(1, dias)) * 7; // por semana
+  let estado;
+  if (lleva >= necesario * 0.9) estado = 'en-ritmo';
+  // Recién creado: aún no se puede opinar (con un plazo lejano, se espera una semana).
+  else if (lleva === 0 && diasEntre(o.creado, hoy) < (dias >= 14 ? 7 : 3)) estado = 'sin-ritmo';
+  else estado = 'en-riesgo';
+  return { estado, dias, falta, necesario, lleva };
+}
+
+/**
  * Progreso del proyecto = promedio de sus objetivos (cada uno pesa lo mismo), sin los ritmos semanales.
  * Devuelve null si el proyecto solo tiene ritmos semanales (no hay avance acumulable que mostrar).
  */
@@ -611,6 +656,10 @@ export function resumenSemana(datos, hoy) {
     vencidos: [...objetivosVencidos, ...tareasVencidas],
     olvidados: datos.proyectos.filter((p) => p.estado === 'activo' && diasEntre(ultimoAvance(p, datos), hoy) >= DIAS_SECUNDARIO_OLVIDADO),
     porOrdenar: datos.bandeja.length,
+    enRiesgo: datos.objetivos
+      .filter(activo)
+      .map((o) => ({ objetivo: o, riesgo: riesgoPlazo(o, datos, hoy) }))
+      .filter((x) => x.riesgo && x.riesgo.estado === 'en-riesgo'),
     objetivosActivos: datos.objetivos.filter(activo),
     diasConAvance: diasConAvance(datos, desde, hoy),
   };
@@ -911,7 +960,7 @@ export function tamanoPorMinutos(m) {
 export function nuevoObjetivo(campos) {
   return {
     tipo: 'resultado', plazo: null, minutosMeta: null, periodo: null, logrado: false,
-    criterio: '', anteriorId: null, archivado: false, etapa: 1, ...campos,
+    criterio: '', anteriorId: null, archivado: false, etapa: 1, logradoEl: null, ...campos,
   };
 }
 
@@ -924,12 +973,13 @@ export function nuevaTarea(campos) {
  * Al terminar la última tarea de un objetivo de resultado, queda logrado: así no se celebra
  * y después se pide "planificarlo" con el plazo vencido. Devuelve true si cambió.
  */
-export function cerrarSiTerminado(d, objetivoId) {
+export function cerrarSiTerminado(d, objetivoId, fecha = null) {
   const o = d.objetivos.find((x) => x.id === objetivoId);
   if (!o || o.tipo !== 'resultado' || o.logrado) return false;
   const tareas = tareasDe(d, objetivoId);
   if (!tareas.length || tareas.some((t) => !t.hecha)) return false;
   o.logrado = true;
+  o.logradoEl = fecha;
   return true;
 }
 
@@ -938,6 +988,7 @@ export function reabrirSiPendiente(d, objetivoId) {
   const o = d.objetivos.find((x) => x.id === objetivoId);
   if (!o || !o.logrado || !tareasDe(d, objetivoId).some((t) => !t.hecha)) return false;
   o.logrado = false;
+  o.logradoEl = null;
   return true;
 }
 
@@ -967,12 +1018,15 @@ export function faltantesSueltos(datos, objetivoId, { llevarPendientes = false }
  *   y esa nota queda resuelta, para que nada quede atrapado en la etapa archivada.
  * Modifica `d` y devuelve el nuevo objetivo.
  */
-export function ampliarObjetivo(d, anteriorId, nuevo, { llevarPendientes = false, faltantesComoTareas = false, crearId = null } = {}) {
+export function ampliarObjetivo(d, anteriorId, nuevo, { llevarPendientes = false, faltantesComoTareas = false, crearId = null, fecha = null } = {}) {
   const anterior = d.objetivos.find((o) => o.id === anteriorId);
   if (!anterior) throw new Error('No existe el objetivo a ampliar.');
   const faltantes = faltantesComoTareas && crearId ? faltantesSueltos(d, anteriorId, { llevarPendientes }) : [];
   anterior.archivado = true;
-  if (anterior.tipo === 'resultado') anterior.logrado = true;
+  if (anterior.tipo === 'resultado' && !anterior.logrado) {
+    anterior.logrado = true;
+    anterior.logradoEl = fecha;
+  }
   const siguiente = nuevoObjetivo({ ...nuevo, proyectoId: anterior.proyectoId, anteriorId, etapa: anterior.etapa + 1 });
   d.objetivos.push(siguiente);
   if (siguiente.tipo === 'resultado') {
@@ -1084,6 +1138,7 @@ export function erroresObjetivo(o, idsProyecto, objetivos = null) {
     if (!PERIODOS.includes(o.periodo)) e.push('periodo no válido');
   }
   if (typeof o.logrado !== 'boolean') e.push('logrado no válido');
+  if (!esFechaOpcional(o.logradoEl)) e.push('fecha de logro no válida');
   if (typeof o.criterio !== 'string' || o.criterio.length > LIMITES.criterio) e.push('la meta concreta es muy larga');
   if (typeof o.archivado !== 'boolean') e.push('archivado no válido');
   if (!esEntero(o.etapa, 1, LIMITES.etapa)) e.push('etapa no válida');
@@ -1106,7 +1161,7 @@ export function erroresTarea(t, objetivos) {
   if (!esEntero(t.minutos, 1, LIMITES.minutos)) e.push('los minutos deben ser un entero de 1 a 1440');
   if (!esFechaOpcional(t.plazo)) e.push('el plazo no es una fecha válida');
   if (!Array.isArray(t.pasos) || t.pasos.length > LIMITES.pasos) e.push(`máximo ${LIMITES.pasos} pasos`);
-  else if (!t.pasos.every((p) => p && esId(p.id) && esTexto(p.texto, LIMITES.texto) && typeof p.hecho === 'boolean')) e.push('hay pasos no válidos');
+  else if (!t.pasos.every((p) => p && esId(p.id) && esTexto(p.texto, LIMITES.texto) && typeof p.hecho === 'boolean' && esFechaOpcional(p.hechoEl))) e.push('hay pasos no válidos');
   if (typeof t.hecha !== 'boolean') e.push('hecha no válido');
   if (!esFechaOpcional(t.hechaEl)) e.push('fecha de término no válida');
   if (!esFechaOpcional(t.tocado)) e.push('fecha de avance no válida');
