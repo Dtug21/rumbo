@@ -111,16 +111,29 @@ const chipTamano = (t) => `<span class="chip tamano-${t}">${L.TAMANOS[t].nombre}
 
 // ---------- Cambios con deshacer ----------
 
-function cambiar(fn, mensaje) {
+/**
+ * Aplica un cambio con deshacer. Con `celebrar` (id de proyecto), el aviso muestra cuánto subió ese proyecto
+ * o celebra el objetivo logrado: ver el avance justo al lograrlo motiva (principio del progreso).
+ */
+function cambiar(fn, mensaje, { celebrar = null } = {}) {
   const antes = JSON.stringify(datos);
+  const previo = datos;
   const copia = structuredClone(datos);
   fn(copia);
   datos = copia;
   guardar(datos);
   deshacerTexto = antes;
   render();
-  if (mensaje) avisar(mensaje, true);
+  const logro = celebrar ? L.celebracion(previo, datos, celebrar, hoy()) : null;
+  if (logro) avisar(logro.grande ? logro.texto : `${mensaje ? `${mensaje} ` : ''}${logro.texto}`, true, logro.grande ? 'grande' : 'avance');
+  else if (mensaje) avisar(mensaje, true);
 }
+
+/** Proyecto al que pertenece una tarea u objetivo (para celebrar su avance). */
+const proyectoDe = ({ tareaId, objetivoId }) => {
+  const o = buscar(datos.objetivos, objetivoId ?? buscar(datos.tareas, tareaId)?.objetivoId);
+  return o?.proyectoId ?? null;
+};
 
 function deshacer() {
   if (!deshacerTexto) return;
@@ -132,8 +145,10 @@ function deshacer() {
 }
 
 let temporizadorToast;
-function avisar(texto, conDeshacer = false) {
-  $toast.innerHTML = `<span>${esc(texto)}</span>${conDeshacer ? boton('deshacer', 'Deshacer') : ''}`;
+function avisar(texto, conDeshacer = false, tono = '') {
+  const icono = tono === 'grande' ? '<span class="toast-icono" aria-hidden="true">✦</span>' : tono === 'avance' ? '<span class="toast-icono" aria-hidden="true">↑</span>' : '';
+  $toast.innerHTML = `${icono}<span>${esc(texto)}</span>${conDeshacer ? boton('deshacer', 'Deshacer') : ''}`;
+  $toast.className = `toast${tono ? ` toast-${tono}` : ''}`;
   $toast.hidden = false;
   clearTimeout(temporizadorToast);
   temporizadorToast = setTimeout(() => ($toast.hidden = true), 8000);
@@ -471,6 +486,9 @@ function bandejaHtml() {
   </section>`;
 }
 
+/** "Para: <meta>" — recordar para qué sirve lo que vas a hacer ayuda a empezar. */
+const paraQue = (o) => (o?.criterio ? `<span class="para-que">Para: ${esc(o.criterio)}</span>` : '');
+
 function vistaHoy() {
   const f = hoy();
   if (!datos.proyectos.length) return bienvenida();
@@ -491,14 +509,14 @@ function vistaHoy() {
     heroe = {
       paso: 2,
       titulo: tituloItem(pendiente),
-      texto: `${esc(pendiente.proyecto.nombre)} · sesión de ${dur(pendiente.minutos)}. Ya está en tu plan de hoy: márcalo al terminar y anota cómo te fue.`,
+      texto: `${paraQue(pendiente.objetivo)}${esc(pendiente.proyecto.nombre)} · sesión de ${dur(pendiente.minutos)}. Ya está en tu plan de hoy: márcalo al terminar y anota cómo te fue.`,
       botones: boton('ir-a', `${icono('play')} Ir a mi plan`, { id: 'plan', clase: 'boton-claro', etiqueta: 'Ir a mi plan de hoy' }),
     };
   } else if (principal) {
     heroe = {
       paso: 1,
       titulo: tituloRec(principal),
-      texto: `<strong>Por qué:</strong> ${principal.motivos.slice(0, 2).map(esc).join(' · ')}.<span class="heroe-meta">${esc(principal.proyecto.nombre)} · ${dur(principal.minutos)}${principal.acortada ? ' · acortada para caber en tu tiempo' : ''}</span>`,
+      texto: `${paraQue(principal.objetivo)}<strong>Por qué:</strong> ${principal.motivos.slice(0, 2).map(esc).join(' · ')}.<span class="heroe-meta">${esc(principal.proyecto.nombre)} · ${dur(principal.minutos)}${principal.acortada ? ' · acortada para caber en tu tiempo' : ''}</span>`,
       extra: vencidoHtml(principal, { claro: true }),
       botones: `${boton('aceptar', `${icono('play')} Aceptar`, { id: principal.clave, clase: 'boton-claro', etiqueta: `Aceptar: ${nombreDe(principal)}` })}
         ${boton('otra', 'Otra', { id: principal.clave, clase: 'boton-contorno', etiqueta: `Mostrar otra en vez de: ${nombreDe(principal)}` })}`,
@@ -532,8 +550,7 @@ function vistaHoy() {
   else frase = `Te faltan ${dur(meta - v.minutosHechos)}. Vas bien.`;
 
   // Solo números que llevan a algo: tu semana (historial) y lo anotado que falta (lista para resolver).
-  const inicio = L.inicioSemana(f);
-  const minutosSemana = datos.registros.filter((r) => r.fecha >= inicio && r.fecha <= f).reduce((s, r) => s + r.minutos, 0);
+  const semana7 = L.resumenSemana(datos, f); // últimos 7 días: días con avance y minutos (pequeños logros)
   const faltantes = datos.notas.filter((n) => n.falta).length;
   const stat = (ic, num, texto, accion, etiqueta) =>
     `<button type="button" class="stat" data-accion="${accion}" data-foco="${accion}:" aria-label="${esc(etiqueta)}"><span class="stat-icono">${icono(ic)}</span><span><span class="stat-num">${num}</span><span class="stat-texto">${texto}</span></span></button>`;
@@ -546,7 +563,7 @@ function vistaHoy() {
   return `
     <p class="ceja">Tu rumbo de hoy</p>
     <div class="cabecera-grande"><div><h1 class="titular">Un paso más cerca, cada día.</h1>
-      <p class="bajada">${esc(fechaLarga(f))}. Qué hacer hoy, y por qué.</p>${momento}</div>
+      <p class="bajada">${esc(fechaLarga(f))}. Qué hacer hoy, y por qué.</p>${L.nuevoComienzo(f, diasAusente) ? `<p class="nuevo-comienzo">${esc(L.nuevoComienzo(f, diasAusente))}</p>` : ''}${momento}</div>
       <div class="fila-botones">${boton('anotar', `${icono('mas')} Anotar rápido`, { clase: 'primario', etiqueta: 'Anotar rápido' })}<a class="boton" href="#/dia/${L.sumarDias(f, -1)}">‹ Días anteriores</a></div></div>
     ${respaldo}
     ${regreso ? `<div class="aviso regreso" role="status"><p><strong>Qué bueno verte de vuelta.</strong> Pasaron ${diasAusente} días: no hay deuda que pagar. Arriba te dejo lo más corto para volver a arrancar.</p>${boton('cerrar-regreso', 'Gracias', { clase: 'chico' })}</div>` : ''}
@@ -572,7 +589,7 @@ function vistaHoy() {
     </div>
     ${bandejaHtml()}
     <div class="estadisticas">
-      ${stat('reloj', dur(minutosSemana), 'Esta semana · ver días', 'ver-semana', `Esta semana: ${dur(minutosSemana)}. Ver mis días anteriores`)}
+      ${stat('reloj', `${semana7.diasConAvance} de 7`, `días con avance · ${dur(semana7.minutos)}`, 'ver-semana', `${semana7.diasConAvance} de 7 días con avance, ${dur(semana7.minutos)}. Ver mis días anteriores`)}
       ${stat('bandera', faltantes, faltantes === 1 ? 'Anotado que falta · resolver' : 'Anotados que faltan · resolver', 'ver-faltantes', `${faltantes} anotados que faltan. Ver y resolver`)}
     </div>
 
@@ -839,6 +856,7 @@ function vistaAjustes() {
       <details class="bloque"><summary>Cómo decide Rumbo</summary>
       <ul class="ayuda lista-ayuda">
         <li><strong>Orden:</strong> dentro de un objetivo, se recomiendan solo las 2 primeras tareas pendientes, en su orden (cámbialo con "Más ⋯ → ↑ Antes / ↓ Después"). Una tarea posterior entra antes solo si tiene su propio plazo cercano.</li>
+        <li><strong>Motivación:</strong> al avanzar ves cuánto subió el proyecto y, al lograr un objetivo, una celebración (principio del progreso, Amabile y Kramer). Cerca de la meta (75% o más, o la última tarea), la tarea sube con "Te falta poco" (gradiente de meta, Kivetz y otros, 2006). La tarjeta verde recuerda para qué es ("Para: …"), y los lunes y el día 1 de cada mes hay mensaje de nuevo comienzo (Dai, Milkman y Riis, 2014). Sin puntos, medallas ni rachas que castiguen.</li>
         <li><strong>Foco de la semana:</strong> los objetivos que eliges en la revisión semanal suben en las recomendaciones esa semana.</li>
         <li><strong>Barra de una tarea:</strong> pasos hechos / pasos totales. Sin pasos, una tarea media o amplia avanza con el tiempo que registras, hasta 90% (el 100% llega al terminarla); una simple está en 0% o 100%.</li>
         <li><strong>Barra de un objetivo de resultado:</strong> sus tareas ponderadas por tamaño (simple 1, media 3, amplia 8), según el avance de cada una.</li>
@@ -1558,11 +1576,11 @@ const acciones = {
   },
   'item-hecho': (id) => {
     const item = L.planDeHoy(datos, hoy()).items.find((i) => i.id === id);
-    cambiar((d) => completarItem(d, id, item.minutos), `Registraste ${dur(item.minutos)}.`);
+    cambiar((d) => completarItem(d, id, item.minutos), `Registraste ${dur(item.minutos)}.`, { celebrar: proyectoDe(item) });
   },
   'item-cantidad': (id) => {
     const item = L.planDeHoy(datos, hoy()).items.find((i) => i.id === id);
-    dialogoMinutos('¿Cuántos minutos le dedicaste?', item.minutos, (m) => cambiar((d) => completarItem(d, id, m), `Registraste ${dur(m)}.`));
+    dialogoMinutos('¿Cuántos minutos le dedicaste?', item.minutos, (m) => cambiar((d) => completarItem(d, id, m), `Registraste ${dur(m)}.`, { celebrar: proyectoDe(item) }));
   },
   'item-quitar': (id) => cambiar((d) => {
     const plan = planEditable(d);
@@ -1592,7 +1610,7 @@ const acciones = {
   logrado: (id) => cambiar((d) => {
     const o = buscar(d.objetivos, id);
     o.logrado = !o.logrado;
-  }, buscar(datos.objetivos, id).logrado ? 'Objetivo reabierto.' : 'Objetivo logrado.'),
+  }, buscar(datos.objetivos, id).logrado ? 'Objetivo reabierto.' : 'Objetivo logrado.', { celebrar: proyectoDe({ objetivoId: id }) }),
   'borrar-objetivo': (id) => {
     const o = buscar(datos.objetivos, id);
     const n = L.tareasDe(datos, id).length;
@@ -1612,12 +1630,12 @@ const acciones = {
   'sumar-tiempo': (valor) => {
     const [id, m] = valor.split('|');
     const o = buscar(datos.objetivos, id);
-    cambiar((d) => d.registros.push({ id: crearId(), fecha: hoy(), minutos: Number(m), objetivoId: id, tareaId: null }), `Registraste ${m} min en "${o.nombre}".`);
+    cambiar((d) => d.registros.push({ id: crearId(), fecha: hoy(), minutos: Number(m), objetivoId: id, tareaId: null }), `Registraste ${m} min en "${o.nombre}".`, { celebrar: o.proyectoId });
   },
   'otra-cantidad': (id) => {
     const o = buscar(datos.objetivos, id);
     dialogoMinutos(`Registrar tiempo en "${o.nombre}"`, 45, (m) =>
-      cambiar((d) => d.registros.push({ id: crearId(), fecha: hoy(), minutos: m, objetivoId: id, tareaId: null }), `Registraste ${dur(m)} en "${o.nombre}".`),
+      cambiar((d) => d.registros.push({ id: crearId(), fecha: hoy(), minutos: m, objetivoId: id, tareaId: null }), `Registraste ${dur(m)} en "${o.nombre}".`, { celebrar: o.proyectoId }),
     );
   },
   ideas: (id) => dialogoIdeas(id),
@@ -1708,7 +1726,7 @@ const acciones = {
     d.tareas = d.tareas.filter((t) => t.id !== id);
     limpiarReferencias(d, { tareas: new Set([id]) });
   }, 'Tarea borrada.'),
-  'terminar-tarea': (id) => cambiar((d) => marcarTerminada(d, buscar(d.tareas, id)), 'Tarea terminada.'),
+  'terminar-tarea': (id) => cambiar((d) => marcarTerminada(d, buscar(d.tareas, id)), 'Tarea terminada.', { celebrar: proyectoDe({ tareaId: id }) }),
   'reabrir-tarea': (id) => cambiar((d) => {
     const t = buscar(d.tareas, id);
     t.hecha = false;
@@ -1840,6 +1858,7 @@ document.addEventListener('change', (e) => {
     const pasoId = el.dataset.pasoId;
     const marcado = el.checked;
     let terminada = false;
+    $toast.hidden = true; // así no se mezcla con un aviso anterior
     cambiar((d) => {
       const t = buscar(d.tareas, tareaId);
       buscar(t.pasos, pasoId).hecho = marcado;
@@ -1850,8 +1869,14 @@ document.addEventListener('change', (e) => {
       } else if (!marcado && t.hecha) {
         t.hecha = false;
       }
-    });
-    if (terminada) avisar(`Tarea "${tituloPaso(datos, tareaId)}" terminada: completaste todos sus pasos.`, true);
+    }, terminada ? '' : null, { celebrar: marcado ? proyectoDe({ tareaId }) : null });
+    if (terminada) {
+      // Junta "tarea terminada" con la celebración que ya se mostró (avance del proyecto u objetivo logrado).
+      const grande = $toast.classList.contains('toast-grande');
+      const celebrado = $toast.hidden ? '' : ($toast.querySelector('span:not(.toast-icono)')?.textContent ?? '');
+      const base = `Tarea "${tituloPaso(datos, tareaId)}" terminada: completaste todos sus pasos.`;
+      avisar(grande ? `${celebrado} ${base}` : `${base} ${celebrado}`.trim(), true, grande ? 'grande' : 'avance');
+    }
   }
 });
 

@@ -21,6 +21,7 @@ export const MAX_POR_OBJETIVO = 2;
 // Dentro de un objetivo, cuántas tareas pendientes (en su orden) pueden recomendarse a la vez.
 export const TAREAS_EN_ORDEN = 2;
 export const DIAS_PARA_BIENVENIDA = 3;
+export const CERCA_DE_LA_META = 0.75;
 export const DIAS_SECUNDARIO_OLVIDADO = 7;
 // Una tarea sin pasos avanza según el tiempo trabajado, pero nunca pasa de 90% hasta que la terminas.
 export const TOPE_POR_TIEMPO = 0.9;
@@ -411,6 +412,11 @@ export function candidatos(datos, hoy) {
     // Las tareas van en orden: se recomiendan solo las primeras pendientes del objetivo
     // (no "Enviar la postulación" antes de "Leer las bases"), salvo que una tenga su propio plazo cercano.
     const enOrden = new Set(pendientes.slice(0, TAREAS_EN_ORDEN).map((t) => t.id));
+    // Gradiente de meta: cerca de lograr el objetivo, el impulso sube (Kivetz y otros, 2006).
+    const avanceObjetivo = progresoObjetivo(o, datos, hoy).valor;
+    const cerca = pendientes.length === 1
+      ? `Es la última tarea para lograr "${o.nombre}"`
+      : avanceObjetivo >= CERCA_DE_LA_META ? `Te falta poco para lograr "${o.nombre}" (${porcentaje(avanceObjetivo)})` : null;
     for (const t of pendientes) {
       const clave = `t:${t.id}`;
       if (fuera.has(clave)) continue;
@@ -432,6 +438,10 @@ export function candidatos(datos, hoy) {
       const quieta = diasEntre(t.tocado ?? t.creado, hoy);
       if (quieta >= 2) puntos += Math.min(21, 3 * quieta);
       if (quieta >= 3) motivos.push(`Llevas ${quieta} días sin tocarla`);
+      if (cerca && tareas.length > 1) {
+        puntos += 12;
+        motivos.unshift(cerca);
+      }
       const prog = progresoTarea(t, datos);
       if (prog > 0) {
         puntos += 10;
@@ -565,7 +575,48 @@ export function resumenSemana(datos, hoy) {
     olvidados: datos.proyectos.filter((p) => p.estado === 'activo' && diasEntre(ultimoAvance(p, datos), hoy) >= DIAS_SECUNDARIO_OLVIDADO),
     porOrdenar: datos.bandeja.length,
     objetivosActivos: datos.objetivos.filter(activo),
+    diasConAvance: diasConAvance(datos, desde, hoy),
   };
+}
+
+/** Días distintos con algún avance (tiempo, tarea terminada, paso o nota) entre dos fechas: pequeños logros visibles. */
+export function diasConAvance(datos, desde, hasta) {
+  const dias = new Set();
+  const dentro = (f) => f && f >= desde && f <= hasta;
+  for (const r of datos.registros) if (dentro(r.fecha)) dias.add(r.fecha);
+  for (const t of datos.tareas) {
+    if (dentro(t.hechaEl)) dias.add(t.hechaEl);
+    if (dentro(t.tocado)) dias.add(t.tocado);
+  }
+  for (const n of datos.notas) if (dentro(n.fecha)) dias.add(n.fecha);
+  return dias.size;
+}
+
+/** Mensaje de nuevo comienzo: lunes, día 1 del mes o regreso tras días fuera (efecto de nuevo comienzo). */
+export function nuevoComienzo(hoy, diasAusente = 0) {
+  if (diasAusente >= DIAS_PARA_BIENVENIDA) return null; // ya lo cubre la bienvenida de regreso
+  if (hoy.endsWith('-01')) return 'Empieza un mes nuevo: buen día para retomar lo que más te importa.';
+  if (diaSemana(hoy) === 1) return 'Semana nueva, borrón y cuenta nueva: lo de la semana pasada ya no pesa.';
+  return null;
+}
+
+/**
+ * Celebración tras un avance: compara el progreso del proyecto antes y después de un cambio.
+ * Devuelve null si no subió; si un objetivo de resultado llegó a 100%, lo dice.
+ */
+export function celebracion(antes, despues, proyectoId, hoy) {
+  const p = despues.proyectos.find((x) => x.id === proyectoId);
+  if (!p) return null;
+  const a = progresoProyecto(p, antes, hoy);
+  const d = progresoProyecto(p, despues, hoy);
+  const logrado = objetivosDe(despues, proyectoId).find((o) => {
+    if (o.tipo !== 'resultado' || o.archivado) return false;
+    const previo = antes.objetivos.find((x) => x.id === o.id);
+    return previo && progresoObjetivo(previo, antes, hoy).valor < 1 && progresoObjetivo(o, despues, hoy).valor >= 1;
+  });
+  if (logrado) return { grande: true, texto: `¡Lograste "${logrado.nombre}"! ${p.nombre} va en ${porcentaje(d ?? 1)}.` };
+  if (a === null || d === null || d <= a) return null;
+  return { grande: false, texto: `${p.nombre}: ${porcentaje(a)} → ${porcentaje(d)}.` };
 }
 
 // ---------- Ideas con IA (copiar y pegar, sin API) ----------

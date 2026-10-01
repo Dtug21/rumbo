@@ -473,6 +473,18 @@ button.stat:hover { background: var(--superficie); border-color: var(--barra); }
 .lista-revision li { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; border-bottom: 1px solid var(--borde); padding: 0.3rem 0; }
 .checks.foco label { align-items: flex-start; }
 
+/* Motivación: para qué, nuevo comienzo y celebraciones */
+.para-que { display: block; margin-bottom: 0.6rem; padding-left: 0.7rem; border-left: 3px solid var(--heroe-tenue); color: var(--heroe-texto); font-weight: 600; }
+.nuevo-comienzo { margin: 0.5rem 0 0; color: var(--primario); font-weight: 600; }
+.toast-icono { font-weight: 800; font-size: 1.1rem; }
+.toast.toast-avance { background: var(--primario); color: #fff; }
+.toast.toast-grande { background: var(--primario); color: #fff; padding: 0.8rem 0.7rem 0.8rem 1.2rem; font-size: 1.05rem; }
+.toast.toast-grande .toast-icono { color: #ffd38a; font-size: 1.3rem; }
+@media (prefers-reduced-motion: no-preference) {
+  .toast-grande { animation: celebrar 0.5s ease-out; }
+  @keyframes celebrar { 0% { transform: scale(0.9); opacity: 0; } 60% { transform: scale(1.04); opacity: 1; } 100% { transform: scale(1); } }
+}
+
 /* Semana en 7 barras */
 .semana { margin: 0 0 1.25rem; }
 .semana-barras { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.4rem; align-items: end; height: 120px; margin: 0.75rem 0 0.25rem; }
