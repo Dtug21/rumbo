@@ -22,8 +22,9 @@ export const MAX_POR_OBJETIVO = 2;
 export const TAREAS_EN_ORDEN = 2;
 export const DIAS_PARA_BIENVENIDA = 3;
 export const CERCA_DE_LA_META = 0.75;
-// Un ritmo semanal atrasado suma hasta 70 puntos (más de lo que suma una tarea olvidada sin plazo).
+// Un ritmo semanal atrasado suma hasta 40 puntos a comienzos de semana y hasta 70 en los últimos 3 días.
 export const PUNTOS_ATRASO_RITMO = 70;
+export const PUNTOS_ATRASO_INICIO = 40;
 export const DIAS_SECUNDARIO_OLVIDADO = 7;
 // Una tarea sin pasos avanza según el tiempo trabajado, pero nunca pasa de 90% hasta que la terminas.
 export const TOPE_POR_TIEMPO = 0.9;
@@ -398,13 +399,15 @@ export function candidatos(datos, hoy) {
       let puntos = 5;
       const hecho = minutosRegistrados(datos, o.id, o.periodo, hoy);
       if (o.periodo === 'semana') {
-        // Atraso respecto de lo esperado a esta altura de la semana (hasta 70 puntos), y un empujón
+        // Atraso respecto de lo esperado a esta altura de la semana, y un empujón
         // cuando quedan 3 días o menos y lo que falta ya no cabe a ritmo normal: si no, una tarea
         // vieja le gana siempre y el ritmo semanal se queda en cero.
         const indice = indiceEnSemana(hoy);
         const esperado = (o.minutosMeta * indice) / 7;
-        if (hecho < esperado) puntos += Math.round((PUNTOS_ATRASO_RITMO * (esperado - hecho)) / o.minutosMeta);
         const quedan = 7 - indice;
+        // Los primeros días pesa como antes (hasta 40): un plazo cercano de una tarea debe ganarle. Al final de la semana, hasta 70.
+        const maximo = quedan <= 3 ? PUNTOS_ATRASO_RITMO : PUNTOS_ATRASO_INICIO;
+        if (hecho < esperado) puntos += Math.round((maximo * (esperado - hecho)) / o.minutosMeta);
         const apurado = quedan <= 3 && (o.minutosMeta - hecho) / quedan > (1.5 * o.minutosMeta) / 7;
         if (apurado) puntos += 15;
         motivos.push(`Vas ${formatoDuracion(hecho)} de ${formatoDuracion(o.minutosMeta)} esta semana${apurado ? ` y ${quedan === 1 ? 'hoy es el último día' : `quedan ${quedan} días`}` : ''}`);
