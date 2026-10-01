@@ -348,8 +348,8 @@ function motivoPlazo(plazo, hoy) {
   const d = diasEntre(hoy, plazo);
   if (d < 0) return { puntos: 100, texto: `El plazo venció hace ${d === -1 ? '1 día' : `${-d} días`}` };
   if (d === 0) return { puntos: 80, texto: 'Vence hoy' };
-  if (d <= 2) return { puntos: 60, texto: `Vence en ${d === 1 ? '1 día' : `${d} días`}` };
-  if (d <= 7) return { puntos: 30, texto: `Vence en ${d} días` };
+  if (d <= 2) return { puntos: 70, texto: `Vence en ${d === 1 ? '1 día' : `${d} días`}` };
+  if (d <= 7) return { puntos: 55, texto: `Vence en ${d} días` };
   return null;
 }
 
