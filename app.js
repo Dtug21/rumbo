@@ -3,6 +3,7 @@ import * as L from './logic.js';
 import { cargar, guardar, crearId, guardarCopiaPrevia, leerCopiaPrevia, pedirPersistencia } from './store.js';
 import { proyectoEjemplo } from './ejemplo.js';
 import { PLANTILLAS, aplicarPlantilla } from './plantillas.js';
+import { codificar, decodificar, puedeTraspasar } from './traspaso.js';
 
 const $main = document.getElementById('principal');
 const $toast = document.getElementById('toast');
@@ -985,6 +986,12 @@ function vistaAjustes() {
         <label class="boton" for="importar">Importar respaldo…</label>
         <input id="importar" class="sr" type="file" accept="application/json,.json" data-importar>
       </div>
+      <h3 class="subtitulo">Pasar tus datos a otro equipo</h3>
+      <p class="ayuda">Sin archivos ni cámara: copias un texto corto, lo pegas en un lugar <strong>privado tuyo</strong> (por ejemplo, «mensajes guardados» de Telegram o una nota) y en el otro equipo tocas «Pegar datos». El texto <strong>no va cifrado</strong>: quien lo vea, lee tus proyectos.</p>
+      <div class="fila-botones">
+        ${boton('copiar-datos', 'Copiar mis datos', { clase: 'primario' })}
+        ${boton('pegar-datos', 'Pegar datos…')}
+      </div>
       ${erroresImportacion.length ? `<div class="aviso" role="alert"><p><strong>No importé el archivo:</strong></p><ul>${erroresImportacion.slice(0, 8).map((e) => `<li>${esc(e)}</li>`).join('')}</ul>${erroresImportacion.length > 8 ? `<p>…y ${erroresImportacion.length - 8} problemas más.</p>` : ''}<p>Tus datos actuales no se tocaron.</p></div>` : ''}
       ${copia ? `<p class="ayuda" style="margin-top:1rem">Hay una copia automática de antes del último reemplazo de datos (${esc(new Date(copia.cuando).toLocaleString('es-CL'))}).</p>${boton('restaurar-copia', 'Restaurar esa copia')}` : ''}
     </section>
@@ -1564,9 +1571,9 @@ function abrirDialogo(titulo, cuerpo, alEnviar, textoEnviar = 'Guardar', extraBo
     <div data-extra></div>
   </form>`;
   const form = $dialogo.querySelector('form');
-  form.addEventListener('submit', (e) => {
+  form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const r = alEnviar(new FormData(form), form);
+    const r = await alEnviar(new FormData(form), form); // puede ser asíncrono (por ejemplo, descomprimir un código pegado)
     const $e = form.querySelector('[data-error]');
     if (typeof r === 'string') {
       $e.textContent = r;
@@ -2264,12 +2271,66 @@ async function importar(archivo) {
     erroresImportacion = r.errores;
     return render();
   }
-  const ok = confirm(
-    `Importar "${archivo.name}": ${plural(r.datos.proyectos.length, 'proyecto', 'proyectos')}, ${plural(r.datos.objetivos.length, 'objetivo', 'objetivos')} y ${plural(r.datos.tareas.length, 'tarea', 'tareas')}.\n\n` +
+  if (!confirmarReemplazo(r.datos, `"${archivo.name}"`)) return;
+  reemplazarDatos(r.datos, 'Respaldo importado. Tu versión anterior quedó como copia previa.');
+}
+
+/** Pregunta antes de reemplazar tus datos, diciendo qué trae lo que vas a importar. */
+function confirmarReemplazo(nuevos, origen) {
+  return confirm(
+    `Importar ${origen}: ${plural(nuevos.proyectos.length, 'proyecto', 'proyectos')}, ${plural(nuevos.objetivos.length, 'objetivo', 'objetivos')} y ${plural(nuevos.tareas.length, 'tarea', 'tareas')}.\n\n` +
       'Esto reemplaza tus datos actuales. Antes guardo una copia automática que puedes restaurar desde Ajustes.',
   );
-  if (!ok) return;
-  reemplazarDatos(r.datos, 'Respaldo importado. Tu versión anterior quedó como copia previa.');
+}
+
+/** Copia tus datos como un texto corto («RUMBO1:…~»). Si el navegador no deja copiar, lo muestra para copiarlo a mano. */
+async function copiarDatos() {
+  let codigo;
+  try {
+    codigo = await codificar(L.exportarTexto(datos, hoy()));
+  } catch (e) {
+    return avisar(e.message);
+  }
+  const kb = Math.max(1, Math.round(codigo.length / 1024));
+  try {
+    await navigator.clipboard.writeText(codigo);
+    avisar(`Copiado (${kb} KB). Pégalo en un lugar privado tuyo y, en el otro equipo, toca «Pegar datos».`);
+  } catch {
+    abrirDialogo(
+      'Copia este texto',
+      `<p class="ayuda">Tu navegador no me dejó copiarlo solo. Selecciónalo todo y cópialo (${kb} KB). Pégalo en un lugar <strong>privado tuyo</strong>: no va cifrado.</p>
+       <div class="campo"><label for="td-codigo">Tus datos</label><textarea id="td-codigo" rows="6" readonly>${esc(codigo)}</textarea></div>`,
+      () => {},
+      'Cerrar',
+    );
+    const $t = $dialogo.querySelector('#td-codigo');
+    $t.focus();
+    $t.select();
+    $dialogo.querySelector('button[type=submit]').remove();
+  }
+}
+
+/** Pegar el texto que copiaste en otro equipo: se revisa, se pregunta y recién ahí se reemplazan tus datos. */
+function dialogoPegarDatos() {
+  abrirDialogo(
+    'Pegar mis datos',
+    `<p class="ayuda">Pega el texto que copiaste con «Copiar mis datos» en el otro equipo. Puede venir dentro de un mensaje: busco el código solo. <strong>Esto reemplaza lo que tengas aquí</strong>, y antes guardo una copia que puedes restaurar en Ajustes.</p>
+     <div class="campo"><label for="pd-codigo">Texto copiado</label><textarea id="pd-codigo" name="codigo" rows="6" required autocomplete="off" spellcheck="false" placeholder="RUMBO1:…"></textarea></div>`,
+    async (fd, form) => {
+      let texto;
+      try {
+        texto = await decodificar(String(fd.get('codigo') ?? ''));
+      } catch (e) {
+        return e.message;
+      }
+      const r = L.importarTexto(texto, hoy());
+      if (!r.ok) return `Ese código no es un respaldo válido de Rumbo: ${r.errores.slice(0, 3).join('; ')}.`;
+      if (!confirmarReemplazo(r.datos, 'el texto pegado')) return false;
+      $dialogo.close();
+      reemplazarDatos(r.datos, 'Datos pasados. Tu versión anterior quedó como copia previa.');
+    },
+    'Revisar y pasar',
+  );
 }
 
 function reemplazarDatos(nuevos, mensaje) {
@@ -2540,6 +2601,8 @@ const acciones = {
 
   // Respaldo y varios
   exportar: () => exportar(),
+  'copiar-datos': () => copiarDatos(),
+  'pegar-datos': () => dialogoPegarDatos(),
   'restaurar-copia': () => restaurarCopia(),
   deshacer: () => deshacer(),
   'cerrar-dialogo': () => $dialogo.close(),
