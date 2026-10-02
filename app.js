@@ -643,6 +643,7 @@ function riesgoHtml(o) {
   const cuanto = (x) => `${Math.max(1, Math.round(x * 100))}%`;
   if (r.estado === 'vencido') return `<p class="riesgo vencido"><span class="chip riesgo-chip">Plazo vencido</span> Falta ${cuanto(r.falta)}. Mueve el plazo o decide cómo seguir.</p>`;
   if (r.estado === 'sin-ritmo') return `<p class="riesgo"><span class="chip">Recién empieza</span> Faltan ${plural(r.dias, 'día', 'días')}. Para llegar, ${r.necesario >= 1 ? 'tendrías que terminarlo todo en estos días' : `necesitas avanzar ~${cuanto(r.necesario)} por semana`}.</p>`;
+  if (r.estado === 'holgado') return `<p class="riesgo ok"><span class="chip riesgo-chip">Hay tiempo</span> Faltan ${plural(r.dias, 'día', 'días')} y con tu tiempo libre alcanza de sobra, si lo vas usando. Avanzaste ${cuanto(r.lleva)} esta semana.</p>`;
   if (r.estado === 'en-ritmo') return `<p class="riesgo ok"><span class="chip riesgo-chip">Vas en ritmo</span> Avanzaste ${cuanto(r.lleva)} esta semana y necesitas ~${cuanto(r.necesario)} para llegar (${plural(r.dias, 'día', 'días')}).</p>`;
   return `<p class="riesgo riesgo-alto"><span class="chip riesgo-chip">En riesgo</span> Faltan ${plural(r.dias, 'día', 'días')} y falta ${cuanto(r.falta)}: ${r.necesario >= 1 ? 'tendrías que terminarlo todo en estos días' : `necesitas avanzar ~${cuanto(r.necesario)} por semana`} y esta semana llevas ${r.lleva ? cuanto(r.lleva) : '0%'}. Acepta algo de este objetivo hoy o mueve el plazo.</p>`;
 }
@@ -661,7 +662,7 @@ function avisoCierre(f) {
 }
 
 /** ¿Está instalada como app? (pantalla de inicio / ventana propia). */
-const estaInstalada = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const estaInstalada = () => window.rumboEscritorio === true || matchMedia('(display-mode: standalone)').matches || navigator.standalone === true; // rumboEscritorio: el programa de Windows
 let ofertaInstalar = null; // lo que el navegador deja usar para instalar (Chrome y Edge)
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();

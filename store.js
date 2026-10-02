@@ -43,10 +43,22 @@ export function cargar(hoy) {
 
 /** Guarda y dice si pudo: el navegador puede negarse (almacenamiento lleno o bloqueado). */
 export function guardar(datos) {
+  const texto = JSON.stringify(datos);
   try {
-    localStorage.setItem(CLAVE, JSON.stringify(datos));
+    localStorage.setItem(CLAVE, texto);
     return true;
   } catch {
+    // Sin espacio: tus datos van primero. Se sueltan las copias automáticas (primero las diarias, luego la previa) hasta que quepan.
+    for (const clave of [CLAVE_DIARIAS, CLAVE_COPIA]) {
+      try {
+        if (localStorage.getItem(clave) === null) continue;
+        localStorage.removeItem(clave);
+        localStorage.setItem(CLAVE, texto);
+        return true;
+      } catch {
+        // sigue con la siguiente
+      }
+    }
     return false;
   }
 }

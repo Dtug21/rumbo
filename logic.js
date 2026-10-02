@@ -315,11 +315,22 @@ export function avanceDeTareaEnVentana(t, datos, desde) {
   return Math.min(1, avance);
 }
 
+const CARGA_EN_RIESGO = 0.35;
+const CARGA_HOLGADA = 0.2;
+
+/** Qué parte de tu tiempo planificable hasta el plazo (hoy incluido) ocuparía lo que falta de las tareas. Máximo 99. */
+function cargaHastaPlazo(tareas, datos, hoy, dias) {
+  const falta = tareas.filter((t) => !t.hecha).reduce((s, t) => s + t.minutos * (1 - progresoTarea(t, datos)), 0) * factorEstimacion(datos);
+  let capacidad = 0;
+  for (let k = 0; k <= dias; k++) capacidad += capacidadDia(datos.disponibilidad, sumarDias(hoy, k));
+  return capacidad > 0 ? Math.min(99, falta / capacidad) : falta > 0 ? 99 : 0;
+}
+
 /**
  * ¿Llegas al plazo de un objetivo de resultado al ritmo de los últimos 7 días?
  * Compara lo que falta (en % del objetivo) con lo que avanzaste esta última semana.
  * Devuelve null si no aplica (sin plazo, logrado, de tiempo o archivado).
- * estado: 'vencido' | 'en-ritmo' | 'en-riesgo' | 'sin-ritmo' (aún no hay semana de datos para opinar).
+ * estado: 'vencido' | 'en-ritmo' | 'en-riesgo' | 'holgado' (no avanzas al ritmo, pero tu tiempo libre alcanza de sobra) | 'sin-ritmo' (aún no hay semana de datos para opinar).
  */
 export function riesgoPlazo(o, datos, hoy) {
   if (o.tipo !== 'resultado' || o.logrado || o.archivado || !o.plazo) return null;
@@ -338,7 +349,15 @@ export function riesgoPlazo(o, datos, hoy) {
   // Recién creado: aún no se puede opinar (con un plazo lejano, se espera una semana).
   else if (lleva === 0 && diasEntre(o.creado, hoy) < (dias >= 14 ? 7 : 3)) estado = 'sin-ritmo';
   else estado = 'en-riesgo';
-  return { estado, dias, falta, necesario, lleva };
+  // El ritmo de los últimos 7 días avisa mal cuando el trabajo llega a saltos (una tarea grande no suma hasta terminarla).
+  // Se contrasta con lo que de verdad cabe: minutos que faltan (según tu estimación y cuánto sueles tardar) sobre tu tiempo
+  // planificable hasta el plazo. En simulaciones, con ≥ 35% de tu tiempo el plazo se perdía 7 de cada 10 veces; con < 20% casi nunca.
+  const carga = cargaHastaPlazo(tareas, datos, hoy, dias);
+  if (estado !== 'sin-ritmo') {
+    if (carga >= CARGA_EN_RIESGO) estado = 'en-riesgo';
+    else if (estado === 'en-riesgo' && carga < CARGA_HOLGADA) estado = 'holgado';
+  }
+  return { estado, dias, falta, necesario, lleva, carga };
 }
 
 /**
