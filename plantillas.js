@@ -7,6 +7,7 @@ const t = (titulo, tamano, minutos, pasos = []) => ({ titulo, tamano, minutos, p
 export const PLANTILLAS = Object.freeze([
   {
     id: 'app',
+    etiquetaPlazo: 'Fecha en que quieres tenerla lista',
     nombre: 'Lanzar una app o producto digital',
     descripcion: 'De la idea a las primeras personas usándolo, sin construir de más.',
     ejemplo: 'Mi app',
@@ -25,6 +26,7 @@ export const PLANTILLAS = Object.freeze([
   },
   {
     id: 'examen',
+    etiquetaPlazo: 'Fecha del examen o concurso',
     nombre: 'Preparar un examen o concurso',
     descripcion: 'Estudio constante más ensayos. Practicar recordando (ensayos, preguntas) rinde más que releer (Dunlosky et al., 2013).',
     ejemplo: 'Concurso cargo diurno',
@@ -43,6 +45,7 @@ export const PLANTILLAS = Object.freeze([
   },
   {
     id: 'postular',
+    etiquetaPlazo: 'Fecha límite para postular',
     nombre: 'Postular a un trabajo o cargo',
     descripcion: 'Postulación completa a tiempo y entrevista preparada.',
     ejemplo: 'Postulación cargo diurno',
@@ -68,6 +71,7 @@ export const PLANTILLAS = Object.freeze([
   },
   {
     id: 'emprender',
+    etiquetaPlazo: 'Fecha en que quieres abrir',
     nombre: 'Validar un emprendimiento',
     descripcion: 'Confirmar que alguien pagaría antes de invertir tiempo y plata en construirlo.',
     ejemplo: 'Mi emprendimiento',
@@ -85,6 +89,7 @@ export const PLANTILLAS = Object.freeze([
   },
   {
     id: 'aprender',
+    etiquetaPlazo: 'Fecha en que quieres lograrlo',
     nombre: 'Aprender una habilidad nueva',
     descripcion: 'Práctica semanal más un proyecto real que demuestre lo aprendido.',
     ejemplo: 'Aprender diseño web',
@@ -102,6 +107,7 @@ export const PLANTILLAS = Object.freeze([
   },
   {
     id: 'creativo',
+    etiquetaPlazo: 'Fecha en que quieres terminarlo',
     nombre: 'Terminar un proyecto creativo',
     descripcion: 'Música, escritura o diseño: tiempo fijo para crear y una definición clara de "terminado".',
     ejemplo: 'Mi canción',
@@ -121,14 +127,17 @@ export const PLANTILLAS = Object.freeze([
 ]);
 
 /** Crea los objetivos y tareas de una plantilla para un proyecto. */
-export function aplicarPlantilla(plantilla, proyectoId, hoy, crearId) {
+export function aplicarPlantilla(plantilla, proyectoId, hoy, crearId, plazo = null) {
   const objetivos = [];
   const tareas = [];
+  let plazoPuesto = false;
   for (const o of plantilla.objetivos) {
     const id = crearId();
     const tiempo = o.tipo === 'tiempo';
     objetivos.push(nuevoObjetivo({
       id, proyectoId, nombre: o.nombre, criterio: o.criterio ?? '', creado: hoy,
+      // La fecha que ponga la persona va al primer objetivo con resultado (el que tiene una meta que lograr).
+      plazo: !tiempo && plazo && !plazoPuesto ? ((plazoPuesto = true), plazo) : null,
       tipo: tiempo ? 'tiempo' : 'resultado', minutosMeta: tiempo ? Math.round(o.horas * 60) : null, periodo: tiempo ? 'semana' : null,
       indicadores: (o.indicadores ?? []).map((nombre) => ({ id: crearId(), nombre, eventos: [] })),
     }));

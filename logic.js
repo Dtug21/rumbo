@@ -26,7 +26,8 @@ export const CERCA_DE_LA_META = 0.75;
 export const PUNTOS_ATRASO_RITMO = 70;
 export const PUNTOS_ATRASO_INICIO = 40;
 // El primer paso que elegiste ayer sube lo suficiente para ir primero, salvo ante un plazo vencido.
-export const PUNTOS_PRIMER_PASO = 45;
+export const PUNTOS_ARRANQUE = 5;
+const PUNTOS_PRIMER_PASO = 45;
 export const DIAS_SECUNDARIO_OLVIDADO = 7;
 // Una tarea sin pasos avanza según el tiempo trabajado, pero nunca pasa de 90% hasta que la terminas.
 export const TOPE_POR_TIEMPO = 0.9;
@@ -533,6 +534,15 @@ export function candidatos(datos, hoy) {
     }
     return puntos;
   };
+  // Un proyecto sin ninguna actividad todavía (ni tiempo, ni tarea hecha, ni nota): su primera tarea es «el primer paso».
+  const sinArrancar = new Map();
+  const proyectoSinArrancar = (p) => {
+    if (!sinArrancar.has(p.id)) {
+      const ids = new Set(objetivosDe(datos, p.id).map((x) => x.id));
+      sinArrancar.set(p.id, !datos.registros.some((r) => ids.has(r.objetivoId)) && !datos.tareas.some((t) => ids.has(t.objetivoId) && (t.hecha || t.tocado)) && !datos.notas.some((n) => ids.has(n.objetivoId)));
+    }
+    return sinArrancar.get(p.id);
+  };
   // Si el plazo ya venció, la tarjeta ofrece moverlo, quitarlo o darlo por hecho.
   const vencido = (fecha, tipo, id) => (fecha && fecha < hoy ? { tipo, id, fecha } : null);
 
@@ -558,12 +568,15 @@ export function candidatos(datos, hoy) {
         // cuando quedan 3 días o menos y lo que falta ya no cabe a ritmo normal: si no, una tarea
         // vieja le gana siempre y el ritmo semanal se queda en cero.
         const indice = indiceEnSemana(hoy);
-        const esperado = (meta * indice) / 7;
+        // Un objetivo creado esta semana no se mide contra una semana entera: cuenta desde el día en que existe.
+        const creadoEstaSemana = !!o.creado && o.creado >= inicioSemana(hoy);
+        const desde = creadoEstaSemana ? indiceEnSemana(o.creado) : 0;
+        const esperado = (meta * (indice - desde)) / 7;
         const quedan = 7 - indice;
         // Los primeros días pesa como antes (hasta 40): un plazo cercano de una tarea debe ganarle. Al final de la semana, hasta 70.
         const maximo = quedan <= 3 ? PUNTOS_ATRASO_RITMO : PUNTOS_ATRASO_INICIO;
         if (hecho < esperado) puntos += Math.round((maximo * (esperado - hecho)) / meta);
-        const apurado = quedan <= 3 && (meta - hecho) / quedan > (1.5 * meta) / 7;
+        const apurado = !creadoEstaSemana && quedan <= 3 && (meta - hecho) / quedan > (1.5 * meta) / 7;
         if (apurado) puntos += 15;
         motivos.push(`Vas ${conteo ? `${hecho} de ${textoCantidad(o, meta)}` : `${fmt(hecho)} de ${fmt(meta)}`} esta semana${apurado ? ` y ${quedan === 1 ? 'hoy es el último día' : `quedan ${quedan} días`}` : ''}`);
       } else {
@@ -652,6 +665,13 @@ export function candidatos(datos, hoy) {
       if (t.noAntesDe && t.esperando) {
         puntos += 10;
         motivos.unshift(`Ya puedes retomarla (esperabas: ${t.esperando.length > 60 ? `${t.esperando.slice(0, 60)}…` : t.esperando})`);
+      }
+      // Arrancar un proyecto nuevo: antes de «dedicarle horas», lo concreto de la primera tarea.
+      if (t.id === disponibles[0].id && proyectoSinArrancar(p)) {
+        puntos += PUNTOS_ARRANQUE;
+        const generico = motivos.indexOf(`Avanza tu objetivo "${o.nombre}"`);
+        if (generico >= 0) motivos.splice(generico, 1);
+        motivos.splice(motivos[0]?.startsWith('Ya puedes retomarla') ? 1 : 0, 0, 'Es lo primero para arrancar este proyecto');
       }
       // En empate, primero la que va antes en el orden (y no la más corta).
       if (t.id === disponibles[0].id && disponibles.length > 1) puntos += 1;
@@ -980,8 +1000,9 @@ export function avanceSemanal(datos, hoy) {
 }
 
 /** Mensaje de nuevo comienzo: lunes, día 1 del mes o regreso tras días fuera (efecto de nuevo comienzo). */
-export function nuevoComienzo(hoy, diasAusente = 0) {
+export function nuevoComienzo(hoy, diasAusente = 0, creado = null) {
   if (diasAusente >= DIAS_PARA_BIENVENIDA) return null; // ya lo cubre la bienvenida de regreso
+  if (creado && diasEntre(creado, hoy) < 3) return null; // quien acaba de llegar no tiene una semana pasada que soltar
   if (hoy.endsWith('-01')) return 'Empieza un mes nuevo: buen día para retomar lo que más te importa.';
   if (diaSemana(hoy) === 1) return 'Semana nueva, borrón y cuenta nueva: lo de la semana pasada ya no pesa.';
   return null;
@@ -1231,7 +1252,16 @@ export function diasSinRespaldo(meta, hoy) {
   return desde ? diasEntre(desde, hoy) : 0;
 }
 
-export const tocaRecordarRespaldo = (meta, hoy) => diasSinRespaldo(meta, hoy) >= DIAS_RECORDAR_RESPALDO;
+/** Respaldo vencido, pero el aviso no se repite todos los días: tras mostrarlo, espera 3 días (si no, se aprende a ignorarlo). */
+export const tocaRecordarRespaldo = (meta, hoy) =>
+  diasSinRespaldo(meta, hoy) >= DIAS_RECORDAR_RESPALDO && (!meta.respaldoAvisado || meta.respaldoAvisado === hoy || diasEntre(meta.respaldoAvisado, hoy) >= 3);
+
+/**
+ * ¿Ofrecer el recordatorio en el calendario? Una vez, el primer día en que ya hiciste algo (es cuando quieres seguir),
+ * mientras no lo hayas descargado ni lo hayas rechazado. Rumbo no puede avisarte sola: el calendario sí.
+ */
+export const tocaOfrecerRecordatorio = (datos, hoy) =>
+  !datos.meta.recordatorioHecho && (!datos.meta.recordatorioVisto || datos.meta.recordatorioVisto === hoy) && (datos.registros.length > 0 || datos.tareas.some((t) => t.hecha));
 
 // ---------- Datos: estructura, migración, validación, import/export ----------
 
@@ -1605,6 +1635,7 @@ export function validarDatos(d) {
   const pp = m?.primerPaso;
   if (pp !== undefined && pp !== null && (typeof pp !== 'object' || !esFechaValida(pp.para) || typeof pp.clave !== 'string' || pp.clave.length > 120)) e.push('el primer paso de mañana no es válido');
   if (m && !esFechaOpcional(m.instalarVisto)) e.push('meta no válida (instalación)');
+  if (m && !(esFechaOpcional(m.recordatorioVisto) && esFechaOpcional(m.recordatorioHecho) && esFechaOpcional(m.respaldoAvisado))) e.push('meta no válida (recordatorios)');
   if (!Array.isArray(d.bandeja) || d.bandeja.length > LIMITES.bandeja) e.push('bandeja "por ordenar" no válida');
   else {
     repetidos(d.bandeja, 'Por ordenar');

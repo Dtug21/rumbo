@@ -1,5 +1,5 @@
 // sw.js — permite abrir Rumbo sin conexión. Red primero (para ver cambios al tiro) y caché si no hay red.
-const CACHE = 'rumbo-v0.15.1';
+const CACHE = 'rumbo-v0.16';
 const ARCHIVOS = [
   './', 'index.html', 'styles.css', 'app.js', 'logic.js', 'store.js', 'traspaso.js', 'calendario.js', 'ejemplo.js', 'plantillas.js',
   'manifest.webmanifest', 'fonts/manrope-latin-wght-normal.woff2', 'fonts/manrope-latin-ext-wght-normal.woff2', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',

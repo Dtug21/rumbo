@@ -4,6 +4,8 @@ import { datosVacios, migrar, validarDatos } from './logic.js';
 const CLAVE = 'rumbo.datos';
 const CLAVE_COPIA = 'rumbo.copiaPrevia';
 const CLAVE_DANADO = 'rumbo.danado';
+const CLAVE_DIARIAS = 'rumbo.copiasDiarias';
+const DIAS_DE_COPIAS = 7;
 
 export const crearId = () =>
   globalThis.crypto?.randomUUID?.() ?? `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -76,5 +78,30 @@ export function leerCopiaPrevia() {
     return JSON.parse(localStorage.getItem(CLAVE_COPIA));
   } catch {
     return null;
+  }
+}
+
+/** Copias de los últimos días: una por día, tomada la primera vez que abres Rumbo ese día (= cómo quedó ayer). */
+export function leerCopiasDiarias() {
+  try {
+    const l = JSON.parse(localStorage.getItem(CLAVE_DIARIAS));
+    return Array.isArray(l) ? l.filter((c) => c && c.fecha && c.datos) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function guardarCopiaDiaria(datos, fecha) {
+  let lista = leerCopiasDiarias();
+  if (lista.some((c) => c.fecha === fecha)) return;
+  lista = [{ fecha, datos }, ...lista].slice(0, DIAS_DE_COPIAS);
+  // Si no cabe, se van descartando las más antiguas antes de rendirse.
+  while (lista.length) {
+    try {
+      localStorage.setItem(CLAVE_DIARIAS, JSON.stringify(lista));
+      return;
+    } catch {
+      lista = lista.slice(0, -1);
+    }
   }
 }

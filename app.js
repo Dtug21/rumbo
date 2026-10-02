@@ -1,6 +1,6 @@
 // app.js — interfaz de Rumbo. Las decisiones (progreso, recomendaciones, validación) viven en logic.js.
 import * as L from './logic.js';
-import { cargar, guardar, crearId, guardarCopiaPrevia, leerCopiaPrevia, pedirPersistencia } from './store.js';
+import { cargar, guardar, crearId, guardarCopiaPrevia, leerCopiaPrevia, pedirPersistencia, guardarCopiaDiaria, leerCopiasDiarias } from './store.js';
 import { proyectoEjemplo } from './ejemplo.js';
 import { PLANTILLAS, aplicarPlantilla } from './plantillas.js';
 import { codificar, decodificar, puedeTraspasar } from './traspaso.js';
@@ -24,6 +24,8 @@ function persistir(d) {
 if (inicio.nuevo) persistir(datos);
 // Con datos que cuidar, se pide al navegador que no los borre por falta de espacio.
 if (datos.proyectos.length) pedirPersistencia();
+// Una copia por día de cómo estaban tus datos al empezar (se restauran desde Ajustes).
+if (datos.proyectos.length) guardarCopiaDiaria(datos, hoy());
 // Regreso: cuántos días pasaron desde la última vez que abriste Rumbo (se anota una vez por día, sin deshacer).
 const diasAusente = L.diasFuera(datos.meta, hoy());
 let bienvenidaVista = false;
@@ -408,9 +410,9 @@ function etiquetaSesion(i) {
 
 /** Título de un ítem del plan, para el historial. */
 function tituloItem(i) {
-  if (i.tipo === 'tiempo') return `${esc(i.objetivo.nombre)}: ${esc(etiquetaSesion(i))}`;
+  if (i.tipo === 'tiempo') return `${esc(i.objetivo.nombre)}: ${esc(etiquetaSesion(i))}${deQuien(i)}`;
   if (i.tipo === 'planificar') return `Planifica "${esc(i.objetivo.nombre)}"`;
-  return esc(i.tarea.titulo);
+  return esc(i.tarea.titulo) + deQuien(i);
 }
 
 function itemPasadoHtml(i, fecha) {
@@ -483,7 +485,7 @@ function avanceHtml() {
       .join('')}`
     : '';
   const carga = a.carga.sobrecargada
-    ? `<div class="aviso carga"><p><strong>Tus metas no caben en tu tiempo.</strong> ${esc(textoCarga(a.carga))} Baja una meta (Proyectos → el objetivo → Más → Editar) o pausa un proyecto.</p></div>`
+    ? `<div class="aviso carga"><p><strong>Tus metas no caben en tu tiempo.</strong> ${esc(textoCarga(a.carga))} Baja una meta o pausa un proyecto.</p>${boton('ajustar-metas', 'Ajustar mis metas', { clase: 'chico primario' })}</div>`
     : '';
   const calibracion = a.calibracion
     ? `<p class="ayuda">En tus ${a.calibracion.n} últimas tareas medianas y amplias tardaste ${a.calibracion.factor >= 1.15 ? `<strong>×${a.calibracion.factor.toFixed(1).replace('.', ',')} lo que estimaste</strong>. Al estimar, suma ese margen.` : a.calibracion.factor <= 0.85 ? `<strong>×${a.calibracion.factor.toFixed(1).replace('.', ',')} lo que estimaste</strong>: estimas de más, puedes ser más ajustado.` : 'más o menos lo que estimaste. Buena estimación.'}</p>`
@@ -538,11 +540,23 @@ function vistaDiaPasado(fecha) {
   `;
 }
 
+/**
+ * Si dos proyectos tienen algo con el mismo nombre (tres exámenes con «Estudiar cada semana»), el título dice de cuál es.
+ * Devuelve el sufijo ya escapado, o '' si el nombre es único.
+ */
+function deQuien(x) {
+  const activo = (o) => datos.proyectos.find((p) => p.id === o.proyectoId)?.estado === 'activo' && !o.archivado;
+  const repetido = x.tipo === 'tarea'
+    ? datos.tareas.some((t) => t.id !== x.tarea.id && !t.hecha && t.titulo === x.tarea.titulo && activo(datos.objetivos.find((o) => o.id === t.objetivoId) ?? {}))
+    : datos.objetivos.some((o) => o.id !== x.objetivo.id && o.nombre === x.objetivo.nombre && activo(o));
+  return repetido ? ` · ${esc(x.proyecto.nombre)}` : '';
+}
+
 /** Título (ya escapado) de una recomendación. */
 function tituloRec(r) {
-  if (r.tipo === 'tiempo') return L.esConteo(r.objetivo) ? `${esc(r.objetivo.nombre)}: ${esc(L.textoCantidad(r.objetivo, r.unidades))}` : `Dedica ${dur(r.minutos)} a ${esc(r.objetivo.nombre)}`;
+  if (r.tipo === 'tiempo') return (L.esConteo(r.objetivo) ? `${esc(r.objetivo.nombre)}: ${esc(L.textoCantidad(r.objetivo, r.unidades))}` : `Dedica ${dur(r.minutos)} a ${esc(r.objetivo.nombre)}`) + deQuien(r);
   if (r.tipo === 'planificar') return `Planifica "${esc(r.objetivo.nombre)}": define sus próximas tareas`;
-  return esc(r.tarea.titulo);
+  return esc(r.tarea.titulo) + deQuien(r);
 }
 
 /** Si el plazo venció: decidir en un toque (moverlo, quitarlo o darlo por hecho) en vez de arrastrarlo cada día. */
@@ -678,22 +692,33 @@ function avisoInstalar() {
     <div class="fila-botones">${ofertaInstalar ? boton('instalar-app', 'Instalar', { clase: 'chico primario' }) : '<a class="boton chico primario" href="#/ajustes">Ver cómo</a>'}${boton('omitir-instalar', 'No, gracias', { clase: 'chico' })}</div></div>`;
 }
 
+/** Respaldo vencido: se muestra, pero no todos los días (se anota cuándo se mostró). */
+function avisoRespaldo(f) {
+  if (!L.tocaRecordarRespaldo(datos.meta, f)) return '';
+  if (datos.meta.respaldoAvisado !== f) queueMicrotask(() => { datos.meta = { ...datos.meta, respaldoAvisado: f }; persistir(datos); });
+  return `<div class="aviso"><p>${datos.meta.ultimoRespaldo ? `Hace ${L.diasSinRespaldo(datos.meta, f)} días que no respaldas.` : 'Todavía no has hecho un respaldo.'} Tus datos viven solo en este navegador.</p>${boton('exportar', 'Descargar respaldo ahora', { clase: 'chico primario' })}</div>`;
+}
+
+/** Rumbo no puede avisarte sola (es una web que vive en tu equipo): se lo pedimos al calendario, una vez, cuando ya quieres seguir. */
+function avisoRecordatorio(f) {
+  if (!L.tocaOfrecerRecordatorio(datos, f)) return '';
+  if (!datos.meta.recordatorioVisto) queueMicrotask(() => { if (!datos.meta.recordatorioVisto) { datos.meta = { ...datos.meta, recordatorioVisto: f }; persistir(datos); } });
+  return `<div class="aviso cierre" role="status"><p><strong>Que no se te pase.</strong> Rumbo no puede avisarte sola, pero tu calendario sí: elige una hora y te recuerda abrirla cada día.</p>
+    <div class="fila-botones">${boton('recordatorio', 'Ponerme un recordatorio', { clase: 'chico primario' })}${boton('omitir-recordatorio', 'No, gracias', { clase: 'chico' })}</div></div>`;
+}
+
 /** Aviso (una vez por semana) cuando las metas semanales no caben en el tiempo planificable. */
 function avisoCarga_(f) {
   const c = L.cargaSemanal(datos, f);
   if (!c.sobrecargada || c.exceso < 30 || datos.meta.cargaAvisoSemana === L.inicioSemana(f)) return '';
   return `<div class="aviso carga" role="status"><p><strong>Tus metas no caben en tu tiempo.</strong> ${esc(textoCarga(c))} Falta ${dur(c.exceso)}: baja una meta o pausa un proyecto.</p>
-    <div class="fila-botones"><a class="boton chico primario" href="#/dia">Ver mi avance</a>${boton('cerrar-carga', 'Entendido', { clase: 'chico' })}</div></div>`;
+    <div class="fila-botones">${boton('ajustar-metas', 'Ajustar mis metas', { clase: 'chico primario' })}${boton('cerrar-carga', 'Entendido', { clase: 'chico' })}</div></div>`;
 }
 
 function vistaHoy() {
   const f = hoy();
   if (!datos.proyectos.length) return bienvenida();
   const v = L.vistaHoy(datos, f, { ignorarCapacidad: verIgualEl === f, soloPoquito: poquitoEl === f });
-  const avisoRespaldo = L.tocaRecordarRespaldo(datos.meta, f)
-    ? `<div class="aviso"><p>${datos.meta.ultimoRespaldo ? `Hace ${L.diasSinRespaldo(datos.meta, f)} días que no respaldas.` : 'Todavía no has hecho un respaldo.'} Tus datos viven solo en este navegador.</p>${boton('exportar', 'Descargar respaldo ahora', { clase: 'chico primario' })}</div>`
-    : '';
-
   // Regreso después de varios días: sin culpa, y arriba lo más corto para volver a arrancar.
   const regreso = diasAusente >= L.DIAS_PARA_BIENVENIDA && !bienvenidaVista;
   const recs = regreso ? [...v.recomendaciones].sort((a, b) => a.minutos - b.minutos) : v.recomendaciones;
@@ -755,8 +780,8 @@ function vistaHoy() {
 
   // Un solo aviso a la vez, el más importante (los demás esperan a que resuelvas este): revisión semanal, regreso, carga, respaldo.
   const avisoRevision = L.tocaRevisionSemanal(datos.meta, f) ? `<div class="aviso revision"><p><strong>Es ${L.diaSemana(f) === 0 ? 'domingo' : 'lunes'}: revisa tu semana.</strong> 5 minutos para ver lo logrado, decidir qué hacer con lo vencido y elegir tu foco.</p>${boton('revision', 'Revisar mi semana', { clase: 'chico primario' })}</div>` : '';
-  const avisoRegreso = regreso ? `<div class="aviso regreso" role="status"><p><strong>Qué bueno verte de vuelta.</strong> Pasaron ${diasAusente} días: no hay deuda que pagar. Arriba te dejo lo más corto para volver a arrancar.</p>${boton('cerrar-regreso', 'Gracias', { clase: 'chico' })}</div>` : '';
-  const avisoUnico = avisoRevision || avisoRegreso || avisoCarga_(f) || avisoCierre(f) || avisoInstalar(f) || avisoRespaldo;
+  const avisoRegreso = regreso ? `<div class="aviso regreso" role="status"><p><strong>Qué bueno verte de vuelta.</strong> Pasaron ${diasAusente} días: no hay deuda que pagar. Arriba te dejo lo más corto para volver a arrancar.</p>${boton('cerrar-regreso', 'Gracias', { clase: 'chico' })}${datos.meta.recordatorioHecho ? '' : boton('recordatorio', 'Ponerme un recordatorio', { clase: 'chico' })}</div>` : '';
+  const avisoUnico = avisoRevision || avisoRegreso || avisoCarga_(f) || avisoCierre(f) || avisoRecordatorio(f) || avisoInstalar(f) || avisoRespaldo(f);
 
   const listaRecs = principal && !pendiente ? otras : recs;
   const cicloHoy = datos.disponibilidad.excepciones[f] === undefined ? L.diaDelCiclo(datos.disponibilidad, f) : null;
@@ -769,7 +794,7 @@ function vistaHoy() {
   return `
     <p class="ceja">Tu rumbo de hoy</p>
     <div class="cabecera-grande"><div><h1 class="titular">Un paso más cerca, cada día.</h1>
-      <p class="bajada">${esc(fechaLarga(f))}.</p>${L.nuevoComienzo(f, diasAusente) ? `<p class="nuevo-comienzo">${esc(L.nuevoComienzo(f, diasAusente))}</p>` : ''}${momento}</div>
+      <p class="bajada">${esc(fechaLarga(f))}.</p>${L.nuevoComienzo(f, diasAusente, datos.meta.creado) ? `<p class="nuevo-comienzo">${esc(L.nuevoComienzo(f, diasAusente, datos.meta.creado))}</p>` : ''}${momento}</div>
       <div class="fila-botones">${boton('anotar', `${icono('mas')} Anotar rápido`, { clase: 'primario', etiqueta: 'Anotar rápido' })}${boton('registrar-tiempo', `${icono('reloj')} Registrar tiempo`, { clase: '', etiqueta: 'Registrar tiempo' })}</div></div>
     <div class="rejilla-hoy">
       <section class="heroe" aria-labelledby="heroe-titulo">
@@ -1044,6 +1069,7 @@ function vistaProyecto(id) {
 function vistaAjustes() {
   const disp = datos.disponibilidad;
   const copia = leerCopiaPrevia();
+  const diarias = leerCopiasDiarias();
   const especiales = Object.entries(disp.excepciones).filter(([f]) => f >= hoy()).sort(([a], [b]) => a.localeCompare(b));
   return `
     <p class="ceja">Preferencias</p>
@@ -1082,6 +1108,7 @@ function vistaAjustes() {
         ${boton('pegar-datos', 'Pegar datos…')}
       </div>
       ${erroresImportacion.length ? `<div class="aviso" role="alert"><p><strong>No importé el archivo:</strong></p><ul>${erroresImportacion.slice(0, 8).map((e) => `<li>${esc(e)}</li>`).join('')}</ul>${erroresImportacion.length > 8 ? `<p>…y ${erroresImportacion.length - 8} problemas más.</p>` : ''}<p>Tus datos actuales no se tocaron.</p></div>` : ''}
+      ${diarias.length ? `<h3 class="subtitulo">Volver a como estaba otro día</h3><p class="ayuda">Rumbo guarda solo, en este equipo, cómo estaban tus datos al empezar cada uno de los últimos días. No reemplaza al respaldo en archivo: si se borra el navegador, estas copias también se van.</p><div class="fila-botones">${diarias.map((c) => boton('restaurar-diaria', `${esc(etiquetaDia(c.fecha))}`, { id: c.fecha, etiqueta: `Volver a como estaba al empezar: ${etiquetaDia(c.fecha)}` })).join('')}</div>` : ''}
       ${copia ? `<p class="ayuda" style="margin-top:1rem">Hay una copia automática de antes del último reemplazo de datos (${esc(new Date(copia.cuando).toLocaleString('es-CL'))}).</p>${boton('restaurar-copia', 'Restaurar esa copia')}` : ''}
     </details>
 
@@ -1777,6 +1804,7 @@ function dialogoProyecto(p = null, plantilla = null, inicial = {}) {
        ${opciones('tipo', [['principal', 'Principal', 'Donde está tu foco. Se recomienda primero.'], ['secundario', 'Secundario', 'Avanza cuando hay tiempo.']], base.tipo)}
      </fieldset>
      <div class="campo"><label for="p-porque">¿Por qué te importa? (opcional)</label><input id="p-porque" name="porque" maxlength="300" autocomplete="off" value="${esc(base.porQue ?? '')}" placeholder="Para tener ingresos estables"><p class="ayuda">Te lo recordaré en tu próximo paso: saber para qué lo haces ayuda a empezar.</p></div>
+     ${nuevo && plantilla?.etiquetaPlazo ? `<div class="campo"><label for="p-plazo">${esc(plantilla.etiquetaPlazo)} (opcional)</label><input id="p-plazo" name="plazo" type="date" min="${hoy()}"><p class="ayuda">Así Rumbo sabe cuándo apurarte y cuándo no.</p></div>` : ''}
      <div class="campo"><label for="p-desc">De qué se trata (opcional)</label><textarea id="p-desc" name="descripcion" maxlength="5000" placeholder="Una o dos líneas. Ayuda a Claude a darte mejores ideas.">${esc(base.descripcion)}</textarea></div>
      ${nuevo ? '' : `<div class="campo"><label for="p-estado">Estado</label><select id="p-estado" name="estado">${L.ESTADOS_PROYECTO.map((e) => `<option value="${e}"${e === base.estado ? ' selected' : ''}>${ETIQUETA_ESTADO[e]}</option>`).join('')}</select><p class="ayuda">Los pausados y terminados no reciben recomendaciones.</p></div>`}`,
     (fd) => {
@@ -1791,7 +1819,7 @@ function dialogoProyecto(p = null, plantilla = null, inicial = {}) {
       const errores = L.erroresProyecto(proyecto);
       if (errores.length) return textoErrores(errores);
       if (nuevo && plantilla) {
-        const { objetivos, tareas } = aplicarPlantilla(plantilla, proyecto.id, hoy(), crearId);
+        const { objetivos, tareas } = aplicarPlantilla(plantilla, proyecto.id, hoy(), crearId, String(fd.get('plazo') ?? '') || null);
         cambiar((d) => {
           d.proyectos.push(proyecto);
           d.objetivos.push(...objetivos);
@@ -2032,6 +2060,31 @@ function dialogoIndicadores(o) {
       const todos = [...mantenidos, ...nuevos].slice(0, L.MAX_INDICADORES);
       cambiar((d) => (buscar(d.objetivos, o.id).indicadores = todos), todos.length ? 'Resultados guardados.' : 'Ya no sigues resultados en este objetivo.');
     },
+  );
+}
+
+/** Las metas semanales de tiempo, todas juntas, para bajarlas cuando no caben en la semana. */
+function dialogoMetasSemanales() {
+  const c = L.cargaSemanal(datos, hoy());
+  const metas = c.metas.filter((o) => o.tipo === 'tiempo' && !L.esConteo(o));
+  if (!metas.length) return avisar('No tienes metas semanales de tiempo que ajustar.');
+  const proyecto = (o) => datos.proyectos.find((p) => p.id === o.proyectoId)?.nombre ?? '';
+  abrirDialogo(
+    'Mis metas semanales',
+    `<p class="ayuda">${esc(textoCarga(c))} ${c.sobrecargada ? `Te faltan ${dur(c.exceso)}: baja alguna.` : 'Ya caben.'}</p>
+     ${metas.map((o) => `<div class="campo"><label for="ms-${esc(o.id)}">${esc(o.nombre)} · ${esc(proyecto(o))} (horas por semana)</label><input id="ms-${esc(o.id)}" name="m-${esc(o.id)}" type="number" inputmode="decimal" min="0.5" max="80" step="0.5" value="${o.minutosMeta / 60}" required></div>`).join('')}`,
+    (fd) => {
+      const nuevas = new Map();
+      for (const o of metas) {
+        const h = Number(fd.get(`m-${o.id}`));
+        if (!(h >= 0.5 && h <= 80)) return 'Cada meta va entre 0,5 y 80 horas por semana.';
+        nuevas.set(o.id, Math.round(h * 60));
+      }
+      cambiar((d) => {
+        for (const o of d.objetivos) if (nuevas.has(o.id)) o.minutosMeta = nuevas.get(o.id);
+      }, 'Metas actualizadas.');
+    },
+    'Guardar metas',
   );
 }
 
@@ -2436,6 +2489,41 @@ function confirmarReemplazo(nuevos, origen) {
   );
 }
 
+function bajarIcs({ plazos = [], diario = null, semanal = null }) {
+  const blob = new Blob([generarIcs({ plazos, diario, semanal, hoy: hoy() })], { type: 'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement('a'), { href: url, download: 'rumbo-recordatorios.ics' });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/** Un solo paso para pedir el recordatorio: la hora, y listo (el archivo se abre en tu calendario). */
+function dialogoRecordatorio() {
+  const plazos = plazosParaCalendario(datos, hoy());
+  abrirDialogo(
+    'Ponerme un recordatorio',
+    `<p class="ayuda">Descargo un archivo y lo abres: tu calendario (Google, Apple u Outlook) te avisará todos los días a la hora que elijas. Rumbo no manda avisos por sí sola.</p>
+     <div class="campo"><label for="rc-hora">¿A qué hora te aviso cada día?</label><input id="rc-hora" name="hora" type="time" value="${'19:00'}" required></div>
+     <div class="checks columna">
+       <label><input type="checkbox" name="semanal" value="1" checked> Y los domingos a las 18:00, mi revisión semanal (5 minutos)</label>
+       ${plazos.length ? `<label><input type="checkbox" name="plazos" value="1" checked> Y mis ${plural(plazos.length, 'plazo', 'plazos')} pendientes, con aviso el día antes</label>` : ''}
+     </div>`,
+    (fd) => {
+      const hora = String(fd.get('hora') ?? '');
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(hora)) return 'Elige una hora válida.';
+      bajarIcs({
+        plazos: fd.get('plazos') ? plazos : [],
+        diario: { hora, texto: 'Abrir Rumbo: ¿qué toca hoy?' },
+        semanal: fd.get('semanal') ? { hora: '18:00', texto: 'Mi revisión semanal en Rumbo (5 minutos)' } : null,
+      });
+      cambiar((d) => (d.meta.recordatorioHecho = hoy()), `Archivo descargado. Ábrelo y elige tu calendario: te avisará cada día a las ${hora}.`);
+    },
+    'Descargar recordatorio',
+  );
+}
+
 /** Descarga un .ics con tus plazos y, si quieres, un recordatorio diario y otro semanal. */
 function descargarCalendario() {
   const $error = $main.querySelector('[data-error-cal]');
@@ -2448,13 +2536,8 @@ function descargarCalendario() {
   $error.textContent = error;
   $error.hidden = !error;
   if (error) return;
-  const blob = new Blob([generarIcs({ plazos, diario, semanal, hoy: hoyF })], { type: 'text/calendar;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = Object.assign(document.createElement('a'), { href: url, download: 'rumbo-recordatorios.ics' });
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  bajarIcs({ plazos, diario, semanal });
+  if (diario || semanal) cambiar((d) => (d.meta.recordatorioHecho = hoyF));
   avisar(`Archivo descargado${plazos.length ? ` con ${plural(plazos.length, 'plazo', 'plazos')}` : ''}. Ábrelo para agregarlo a tu calendario.`);
 }
 
@@ -2515,6 +2598,17 @@ function reemplazarDatos(nuevos, mensaje) {
   persistir(datos);
   render();
   avisar(mensaje);
+}
+
+function restaurarDiaria(fecha) {
+  const c = leerCopiasDiarias().find((x) => x.fecha === fecha);
+  const r = c ? L.importarTexto(JSON.stringify(c.datos), hoy()) : { ok: false, errores: ['No encuentro esa copia.'] };
+  if (!r.ok) {
+    erroresImportacion = r.errores;
+    return render();
+  }
+  if (!confirm(`¿Volver a como estaba al empezar: ${etiquetaDia(fecha)}? Lo que hiciste después se pierde, pero tus datos actuales quedan como copia previa.`)) return;
+  reemplazarDatos(r.datos, 'Listo: volviste a esa versión. Lo de ahora quedó como copia previa.');
 }
 
 function restaurarCopia() {
@@ -2719,6 +2813,8 @@ const acciones = {
     cambiar((d) => (d.meta.primerPaso = { para: L.sumarDias(hoy(), 1), clave }), `Listo: mañana empiezas por «${o?.titulo ?? 'tu elección'}». Que descanses.`);
   },
   'omitir-cierre': () => cambiar((d) => (d.meta.cierreOmitido = hoy())),
+  recordatorio: () => dialogoRecordatorio(),
+  'omitir-recordatorio': () => cambiar((d) => (d.meta.recordatorioVisto = '2000-01-01')),
   'omitir-instalar': () => cambiar((d) => (d.meta.instalarVisto = '2000-01-01')), // en el pasado: nunca más
   'instalar-app': async () => {
     if (!ofertaInstalar) return;
@@ -2727,6 +2823,7 @@ const acciones = {
     ofertaInstalar = null;
     cambiar((d) => (d.meta.instalarVisto = '2000-01-01'), r.outcome === 'accepted' ? 'Instalada. La encuentras en tu pantalla de inicio.' : 'Cuando quieras, la puedes instalar desde Ajustes.');
   },
+  'ajustar-metas': () => dialogoMetasSemanales(),
   'cerrar-carga': () => cambiar((d) => (d.meta.cargaAvisoSemana = L.inicioSemana(hoy()))),
   'cerrar-regreso': () => {
     bienvenidaVista = true;
@@ -2829,6 +2926,7 @@ const acciones = {
   'copiar-datos': () => copiarDatos(),
   'pegar-datos': () => dialogoPegarDatos(),
   'restaurar-copia': () => restaurarCopia(),
+  'restaurar-diaria': (id) => restaurarDiaria(id),
   deshacer: () => deshacer(),
   'cerrar-dialogo': () => $dialogo.close(),
   'ir-a': (id) => {
