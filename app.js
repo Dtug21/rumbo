@@ -100,6 +100,9 @@ const plural = (n, uno, varios) => `${n} ${n === 1 ? uno : varios}`;
 const haceDias = (d) => (d <= 0 ? 'hoy' : d === 1 ? 'ayer' : `hace ${d} días`);
 const NOMBRES_DIA = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const ORDEN_DIAS = [1, 2, 3, 4, 5, 6, 0];
+/** Una tarea recién agregada nunca queda escondida tras «Ver N tareas más»: se abre esa lista. */
+const mostrarTareaNueva = (objetivoId) => abiertas.add(`mas:${objetivoId}`);
+const TAREAS_A_LA_VISTA = 4; // en un objetivo con más pendientes, el resto queda tras «Ver N tareas más»
 const ETIQUETA_TIPO = { principal: 'Principal', secundario: 'Secundario' };
 const ETIQUETA_ESTADO = { activo: 'Activo', pausado: 'Pausado', terminado: 'Terminado' };
 
@@ -567,7 +570,7 @@ function recomendacionHtml(r) {
     <div class="item-cabeza"><h3>${titulo}</h3><span class="pct">${pct(prog)}</span></div>
     <div class="meta"><span>${esc(r.proyecto.nombre)}${r.tipo === 'tarea' ? ` · ${esc(r.objetivo.nombre)}` : ''}</span>${chip}</div>
     ${barra(prog, `Avance actual de ${nombreDe(r)}`)}
-    <p class="porque"><strong>Por qué:</strong> ${r.motivos.map(esc).join(' · ')}${r.acortada ? ' · Acortada para caber en tu tiempo' : ''}.</p>
+    <p class="porque"><strong>Por qué:</strong> ${r.motivos.slice(0, 2).map(esc).join(' · ')}${r.acortada ? ' · Acortada para caber en tu tiempo' : ''}.</p>
     ${vencidoHtml(r)}
     <div class="fila-botones">
       ${boton('aceptar', 'Aceptar', { id: r.clave, clase: 'chico primario', etiqueta: `Aceptar: ${nombreDe(r)}` })}
@@ -581,7 +584,7 @@ function bandejaHtml() {
   if (!datos.bandeja.length) return '';
   return `<section class="tarjeta bandeja" aria-labelledby="bandeja-titulo">
     <div class="item-cabeza"><h2 id="bandeja-titulo" class="titulo-tarjeta">Por ordenar (${datos.bandeja.length})</h2>${icono('bandera', 'icono-suave')}</div>
-    <p class="ayuda">Lo que anotaste rápido. Dale un objetivo para que entre a tus recomendaciones, o descártalo. Si no sabes qué es, toca «¿Qué es?».</p>
+    <p class="ayuda">Lo que anotaste rápido: dale un objetivo o descártalo.</p>
     <ul class="lista-bandeja">${datos.bandeja
       .map((b) => `<li><span>${esc(b.texto)}</span><span class="acciones-nota">
         ${boton('ordenar', 'Ordenar', { id: b.id, clase: 'chico primario', etiqueta: `Ordenar: ${b.texto}` })}
@@ -629,7 +632,7 @@ function vistaHoy() {
   const f = hoy();
   if (!datos.proyectos.length) return bienvenida();
   const v = L.vistaHoy(datos, f, { ignorarCapacidad: verIgualEl === f });
-  const respaldo = L.tocaRecordarRespaldo(datos.meta, f)
+  const avisoRespaldo = L.tocaRecordarRespaldo(datos.meta, f)
     ? `<div class="aviso"><p>${datos.meta.ultimoRespaldo ? `Hace ${L.diasSinRespaldo(datos.meta, f)} días que no respaldas.` : 'Todavía no has hecho un respaldo.'} Tus datos viven solo en este navegador.</p>${boton('exportar', 'Descargar respaldo ahora', { clase: 'chico primario' })}</div>`
     : '';
 
@@ -688,24 +691,25 @@ function vistaHoy() {
   // Solo números que llevan a algo: tu semana (historial) y lo anotado que falta (lista para resolver).
   const semana7 = L.resumenSemana(datos, f); // últimos 7 días: días con avance y minutos (pequeños logros)
   const faltantes = datos.notas.filter((n) => n.falta).length;
-  const stat = (ic, num, texto, accion, etiqueta) =>
-    `<button type="button" class="stat" data-accion="${accion}" data-foco="${accion}:" aria-label="${esc(etiqueta)}"><span class="stat-icono">${icono(ic)}</span><span><span class="stat-num">${num}</span><span class="stat-texto">${texto}</span></span></button>`;
+
+  // Un solo aviso a la vez, el más importante (los demás esperan a que resuelvas este): revisión semanal, regreso, carga, respaldo.
+  const avisoRevision = L.tocaRevisionSemanal(datos.meta, f) ? `<div class="aviso revision"><p><strong>Es ${L.diaSemana(f) === 0 ? 'domingo' : 'lunes'}: revisa tu semana.</strong> 5 minutos para ver lo logrado, decidir qué hacer con lo vencido y elegir tu foco.</p>${boton('revision', 'Revisar mi semana', { clase: 'chico primario' })}</div>` : '';
+  const avisoRegreso = regreso ? `<div class="aviso regreso" role="status"><p><strong>Qué bueno verte de vuelta.</strong> Pasaron ${diasAusente} días: no hay deuda que pagar. Arriba te dejo lo más corto para volver a arrancar.</p>${boton('cerrar-regreso', 'Gracias', { clase: 'chico' })}</div>` : '';
+  const avisoUnico = avisoRevision || avisoRegreso || avisoCarga_(f) || avisoRespaldo;
 
   const listaRecs = principal && !pendiente ? otras : recs;
   const cicloHoy = datos.disponibilidad.excepciones[f] === undefined ? L.diaDelCiclo(datos.disponibilidad, f) : null;
   const momento = datos.meta.momento
     ? `<p class="momento">${icono('reloj')} Tu momento Rumbo: <strong>${esc(datos.meta.momento)}</strong> ${boton('momento', 'Cambiar', { clase: 'chico plano', etiqueta: 'Cambiar mi momento Rumbo' })}</p>`
-    : `<p class="momento">${icono('reloj')} ¿Cuándo abrirás Rumbo cada día? ${boton('momento', 'Elegir mi momento Rumbo', { clase: 'chico plano' })}</p>`;
+    : L.diasEntre(datos.meta.creado ?? f, f) <= 7
+      ? `<p class="momento">${icono('reloj')} ¿Cuándo abrirás Rumbo cada día? ${boton('momento', 'Elegir mi momento Rumbo', { clase: 'chico plano' })}</p>`
+      : ''; // pasada la primera semana, no se insiste (se puede elegir en Ajustes)
 
   return `
     <p class="ceja">Tu rumbo de hoy</p>
     <div class="cabecera-grande"><div><h1 class="titular">Un paso más cerca, cada día.</h1>
-      <p class="bajada">${esc(fechaLarga(f))}. Qué hacer hoy, y por qué.</p>${L.nuevoComienzo(f, diasAusente) ? `<p class="nuevo-comienzo">${esc(L.nuevoComienzo(f, diasAusente))}</p>` : ''}${momento}</div>
-      <div class="fila-botones">${boton('anotar', `${icono('mas')} Anotar rápido`, { clase: 'primario', etiqueta: 'Anotar rápido' })}${boton('registrar-tiempo', `${icono('reloj')} Registrar tiempo`, { clase: '', etiqueta: 'Registrar tiempo' })}<a class="boton" href="#/dia/${L.sumarDias(f, -1)}">‹ Días anteriores</a></div></div>
-    ${respaldo}
-    ${avisoCarga_(f)}
-    ${regreso ? `<div class="aviso regreso" role="status"><p><strong>Qué bueno verte de vuelta.</strong> Pasaron ${diasAusente} días: no hay deuda que pagar. Arriba te dejo lo más corto para volver a arrancar.</p>${boton('cerrar-regreso', 'Gracias', { clase: 'chico' })}</div>` : ''}
-    ${L.tocaRevisionSemanal(datos.meta, f) ? `<div class="aviso revision"><p><strong>Es ${L.diaSemana(f) === 0 ? 'domingo' : 'lunes'}: revisa tu semana.</strong> 5 minutos para ver lo logrado, decidir qué hacer con lo vencido y elegir tu foco.</p>${boton('revision', 'Revisar mi semana', { clase: 'chico primario' })}</div>` : ''}
+      <p class="bajada">${esc(fechaLarga(f))}.</p>${L.nuevoComienzo(f, diasAusente) ? `<p class="nuevo-comienzo">${esc(L.nuevoComienzo(f, diasAusente))}</p>` : ''}${momento}</div>
+      <div class="fila-botones">${boton('anotar', `${icono('mas')} Anotar rápido`, { clase: 'primario', etiqueta: 'Anotar rápido' })}${boton('registrar-tiempo', `${icono('reloj')} Registrar tiempo`, { clase: '', etiqueta: 'Registrar tiempo' })}</div></div>
     <div class="rejilla-hoy">
       <section class="heroe" aria-labelledby="heroe-titulo">
         <span class="insignia">${icono('chispa')} Tu próximo paso</span>
@@ -725,15 +729,12 @@ function vistaHoy() {
         <p class="ayuda">${cicloHoy ? `Hoy es ${esc(nombreDiaCiclo(cicloHoy))}. ` : ''}Tienes ${dur(v.libres)} libres; Rumbo planifica ${dur(v.capacidad)} (70%). ${boton('editar-libres', 'Cambiar', { clase: 'chico plano', etiqueta: 'Cambiar mis minutos libres' })}</p>
       </section>
     </div>
+    ${avisoUnico}
     ${bandejaHtml()}
-    <div class="estadisticas">
-      ${stat('reloj', `${semana7.diasConAvance} de 7`, `días con avance · ${dur(semana7.minutos)}`, 'ver-semana', `${semana7.diasConAvance} de 7 días con avance, ${dur(semana7.minutos)}. Ver mis días anteriores`)}
-      ${stat('bandera', faltantes, faltantes === 1 ? 'Anotado que falta · resolver' : 'Anotados que faltan · resolver', 'ver-faltantes', `${faltantes} anotados que faltan. Ver y resolver`)}
-    </div>
-
     ${v.items.length ? `<h2 id="plan" tabindex="-1">Mi plan de hoy</h2><ul class="lista">${v.items.map(itemHtml).join('')}</ul>` : ''}
     ${listaRecs.length ? `<h2>${principal && !pendiente ? 'Otras opciones' : v.items.length ? 'Para seguir, te recomiendo' : 'Te recomiendo'}</h2><ul class="lista">${listaRecs.map(recomendacionHtml).join('')}</ul>` : ''}
     ${v.extra ? `<h2>Si te sobra tiempo</h2><ul class="lista">${recomendacionHtml(v.extra)}</ul>` : ''}
+    <p class="resumen-dia">${boton('ver-semana', `${semana7.diasConAvance} de 7 días con avance · ${dur(semana7.minutos)}`, { clase: 'chico plano', etiqueta: `${semana7.diasConAvance} de 7 días con avance, ${dur(semana7.minutos)}. Ver mis días anteriores` })}${faltantes ? ` ${boton('ver-faltantes', `${faltantes === 1 ? '1 anotado que falta' : `${faltantes} anotados que faltan`} · resolver`, { clase: 'chico plano', etiqueta: `${faltantes} anotados que faltan. Ver y resolver` })}` : ''}</p>
   `;
 }
 
@@ -915,11 +916,12 @@ function objetivoHtml(o) {
     }
     cuerpo = `
       ${tareas.length ? '' : '<p class="ayuda">Aún no tiene tareas. Agrégalas tú o pide ideas a Claude.</p>'}
-      ${pendientes.length ? `<ul class="lista tareas">${pendientes.map(tareaHtml).join('')}</ul>` : ''}
+      ${pendientes.length ? `<ul class="lista tareas">${pendientes.slice(0, TAREAS_A_LA_VISTA).map(tareaHtml).join('')}</ul>` : ''}
+      ${pendientes.length > TAREAS_A_LA_VISTA ? `<details class="bloque chico" data-abierto="mas:${esc(o.id)}"${abiertas.has(`mas:${o.id}`) ? ' open' : ''}><summary>Ver ${plural(pendientes.length - TAREAS_A_LA_VISTA, 'tarea más', 'tareas más')}</summary><ul class="lista tareas">${pendientes.slice(TAREAS_A_LA_VISTA).map(tareaHtml).join('')}</ul></details>` : ''}
       ${hechas.length ? `<details class="bloque chico"><summary>Hechas (${hechas.length})</summary><ul class="lista tareas">${hechas.map(tareaHtml).join('')}</ul></details>` : ''}
       <div class="fila-botones">
         ${boton('nueva-tarea', '+ Tarea', { id: o.id, clase: 'chico primario', etiqueta: `Nueva tarea en ${o.nombre}` })}
-        ${boton('ideas', 'Pedir ideas a Claude', { id: o.id })}
+        ${tareas.length ? '' : boton('ideas', 'Pedir ideas a Claude', { id: o.id })}
       </div>`;
   }
   return `<section class="tarjeta objetivo" aria-label="Objetivo: ${esc(o.nombre)}">
@@ -937,6 +939,7 @@ function objetivoHtml(o) {
       ${boton('nota-objetivo', '+ Nota', { id: o.id, clase: 'chico plano', etiqueta: `Agregar nota al objetivo ${o.nombre}` })}
       ${menuMas(`o:${o.id}`, `Más opciones del objetivo ${o.nombre}`, [
         boton('editar-objetivo', 'Editar objetivo', { id: o.id, clase: 'chico plano' }),
+        o.tipo === 'resultado' && L.tareasDe(datos, o.id).length ? boton('ideas', 'Pedir ideas a Claude', { id: o.id, clase: 'chico plano' }) : '',
         boton('editar-indicadores', (o.indicadores ?? []).length ? 'Editar resultados…' : 'Seguir resultados…', { id: o.id, clase: 'chico plano', etiqueta: `Resultados que sigues en ${o.nombre}` }),
         o.tipo === 'resultado' && !logro ? boton('logrado', o.logrado ? 'Reabrir objetivo' : 'Marcar logrado', { id: o.id, clase: 'chico plano' }) : '',
         o.tipo === 'resultado' && o.logrado ? boton('logrado', 'Reabrir objetivo', { id: o.id, clase: 'chico plano' }) : '',
@@ -959,12 +962,14 @@ function vistaProyecto(id) {
       <p class="meta"><span class="chip">${ETIQUETA_TIPO[p.tipo]}</span>${p.estado !== 'activo' ? `<span class="chip">${ETIQUETA_ESTADO[p.estado]}</span>` : ''}<span>último avance ${haceDias(r.diasSinAvance)}</span>${r.etapasLogradas ? `<span>${plural(r.etapasLogradas, 'etapa lograda', 'etapas logradas')}</span>` : ''}</p></div>
       ${r.progreso === null ? '' : `<span class="pct enorme">${pct(r.progreso)}</span>`}</div>
     ${r.progreso === null ? '' : barra(r.progreso, `Avance de ${p.nombre}`, 'enorme')}
-    ${r.ritmos.length ? `<p class="ayuda">Los objetivos semanales se muestran como ritmo: vuelven a cero cada lunes, así que no suman al avance del proyecto.</p>` : ''}
+    ${r.ritmos.length ? `<p class="ayuda">Las metas semanales no suman al avance: vuelven a cero cada lunes.</p>` : ''}
     ${p.descripcion ? `<p class="descripcion">${esc(p.descripcion)}</p>` : ''}
     <div class="fila-botones">
       ${boton('nuevo-objetivo', '+ Objetivo', { id: p.id, clase: 'primario' })}
-      ${boton('ideas-objetivos', `${icono('chispa')} Ideas de objetivos`, { id: p.id, etiqueta: 'Ideas de objetivos' })}
-      ${boton('editar-proyecto', 'Editar proyecto', { id: p.id, clase: '' })}
+      ${menuMas(`p:${p.id}`, `Más opciones del proyecto ${p.nombre}`, [
+        boton('editar-proyecto', 'Editar proyecto', { id: p.id, clase: 'chico plano' }),
+        boton('ideas-objetivos', 'Ideas de objetivos', { id: p.id, clase: 'chico plano', etiqueta: 'Ideas de objetivos' }),
+      ])}
     </div>
     <h2>Objetivos</h2>
     ${objetivos.length ? objetivos.map(objetivoHtml).join('') : '<p class="vacio">Agrega el primer objetivo: qué quieres lograr, o cuánto tiempo quieres dedicarle a algo.</p>'}
@@ -981,8 +986,8 @@ function vistaAjustes() {
   return `
     <p class="ceja">Preferencias</p>
     <div class="cabecera-grande"><div><h1 class="titular">Ajustes</h1><p class="bajada">Tu tiempo, tus respaldos y cómo decide Rumbo.</p></div></div>
-    <section class="tarjeta seccion">
-      <h2>Mis minutos libres por día</h2>
+    <details class="tarjeta seccion plegable" open>
+      <summary><h2>Mis minutos libres por día</h2></summary>
       ${disp.ciclo ? cicloHtml(disp) : `<p class="ayuda">Tu semana normal: el tiempo que de verdad tienes para tus proyectos (fuera de turnos y obligaciones). Rumbo recomienda hasta el 70% de ese tiempo.</p>
       <form data-form="disponibilidad">
         <div class="dias">
@@ -997,10 +1002,10 @@ function vistaAjustes() {
       <h3 class="subtitulo">Días especiales</h3>
       ${especiales.length ? `<ul class="especiales">${especiales.map(([f, m]) => `<li><span>${esc(etiquetaDia(f))}: ${dur(m)} libres</span>${boton('quitar-excepcion', 'Quitar', { id: f, clase: 'chico plano', etiqueta: `Quitar día especial: ${etiquetaDia(f)}` })}</li>`).join('')}</ul>` : '<p class="ayuda">Ninguno. Úsalos para turnos: marca con anticipación cuánto tiempo tendrás.</p>'}
       ${boton('editar-libres', 'Marcar un día especial')}
-    </section>
+    </details>
 
-    <section class="tarjeta seccion">
-      <h2>Respaldo</h2>
+    <details class="tarjeta seccion plegable" open>
+      <summary><h2>Respaldo</h2></summary>
       <p>Tus datos viven solo en este navegador: sin cuentas, sin servidor, sin telemetría. Si se borran los datos del navegador, se pierden. Descarga un respaldo cada semana y guárdalo fuera (por ejemplo, en tu Drive).</p>
       <p class="ayuda">Último respaldo: ${datos.meta.ultimoRespaldo ? esc(fechaLarga(datos.meta.ultimoRespaldo)) : 'nunca'}.</p>
       <div class="fila-botones">
@@ -1016,10 +1021,10 @@ function vistaAjustes() {
       </div>
       ${erroresImportacion.length ? `<div class="aviso" role="alert"><p><strong>No importé el archivo:</strong></p><ul>${erroresImportacion.slice(0, 8).map((e) => `<li>${esc(e)}</li>`).join('')}</ul>${erroresImportacion.length > 8 ? `<p>…y ${erroresImportacion.length - 8} problemas más.</p>` : ''}<p>Tus datos actuales no se tocaron.</p></div>` : ''}
       ${copia ? `<p class="ayuda" style="margin-top:1rem">Hay una copia automática de antes del último reemplazo de datos (${esc(new Date(copia.cuando).toLocaleString('es-CL'))}).</p>${boton('restaurar-copia', 'Restaurar esa copia')}` : ''}
-    </section>
+    </details>
 
-    <section class="tarjeta seccion" aria-labelledby="cal-titulo">
-      <h2 id="cal-titulo">Recordatorios en tu calendario</h2>
+    <details class="tarjeta seccion plegable" aria-labelledby="cal-titulo">
+      <summary><h2 id="cal-titulo">Recordatorios en tu calendario</h2></summary>
       <p class="ayuda">Rumbo no manda notificaciones; tu calendario sí. Descarga un archivo y ábrelo: Google Calendar, Apple Calendar y Outlook lo importan. Si cambias plazos, vuelve a descargarlo: se actualizan en vez de repetirse.</p>
       <div class="checks columna">
         <label><input type="checkbox" id="cal-plazos" checked> Mis plazos pendientes (${plural(plazosParaCalendario(datos, hoy()).length, 'plazo', 'plazos')}), con aviso el día antes y ese día a las 9:00</label>
@@ -1028,14 +1033,14 @@ function vistaAjustes() {
       </div>
       <p class="error" data-error-cal hidden></p>
       ${boton('descargar-calendario', 'Descargar para mi calendario (.ics)', { clase: 'primario' })}
-    </section>
+    </details>
 
-    <section class="tarjeta seccion">
-      <h2>Tu momento Rumbo</h2>
+    <details class="tarjeta seccion plegable">
+      <summary><h2>Tu momento Rumbo</h2></summary>
       <p class="ayuda">Rumbo no manda notificaciones: funciona si lo abres a la misma hora y en el mismo lugar.</p>
       <p>${datos.meta.momento ? `Hoy es: <strong>${esc(datos.meta.momento)}</strong>` : 'Aún no lo eliges.'}</p>
       ${boton('momento', datos.meta.momento ? 'Cambiar mi momento Rumbo' : 'Elegir mi momento Rumbo')}
-    </section>
+    </details>
 
     <section class="tarjeta seccion">
       <details class="bloque"><summary>Cómo decide Rumbo</summary>
@@ -1065,19 +1070,19 @@ function vistaAjustes() {
       </details>
     </section>
 
-    <section class="tarjeta seccion">
-      <h2>Apariencia</h2>
+    <details class="tarjeta seccion plegable">
+      <summary><h2>Apariencia</h2></summary>
       <p class="ayuda">También puedes cambiar entre día y noche con el botón de arriba. Se recuerda en este equipo.</p>
       <fieldset class="campo"><legend class="sr">Modo de color</legend>
         ${opciones('tema-app', [['auto', 'Automático', 'Sigue al día o noche de tu teléfono o computador.'], ['claro', 'Día', 'Fondo claro.'], ['oscuro', 'Noche', 'Fondo oscuro, más descansado de noche.']], leerTema())}
       </fieldset>
-    </section>
+    </details>
 
-    <section class="tarjeta seccion">
-      <h2>Proyecto de ejemplo</h2>
+    <details class="tarjeta seccion plegable">
+      <summary><h2>Proyecto de ejemplo</h2></summary>
       <p class="ayuda">Agrega un proyecto de muestra para ver cómo funciona todo. Bórralo cuando quieras desde su página.</p>
       ${boton('cargar-ejemplo', 'Agregar proyecto de ejemplo')}
-    </section>`;
+    </details>`;
 }
 
 // ---------- Ciclo de turnos ----------
@@ -1277,8 +1282,8 @@ function vistaGuia() {
     <div class="cabecera-grande"><div><h1 class="titular">Guía</h1><p class="bajada">Cómo ordenar tus cosas sin mezclarlas.</p></div>
       <div class="fila-botones">${boton('clasificar', `${icono('chispa')} ¿Qué es esto?`, { clase: 'primario grande-boton', etiqueta: '¿Qué es esto?' })}${boton('tutorial-empezar', `${icono('play')} Hacer el tutorial`, { clase: 'grande-boton', etiqueta: 'Hacer el tutorial' })}</div></div>
 
-    <section class="tarjeta seccion">
-      <h2>Las 4 piezas, de lo grande a lo chico</h2>
+    <details class="tarjeta seccion plegable" open>
+      <summary><h2>Las 4 piezas, de lo grande a lo chico</h2></summary>
       <ul class="piezas">
         ${pieza('Proyecto', 'Algo grande que te toma semanas o meses.', 'necesita varias tareas distintas y varias sesiones.', '«Postular a un trabajo», «Lanzar mi tienda online».')}
         ${pieza('Objetivo', 'Lo que quieres lograr dentro del proyecto.', 'al final puedes decir «sí, se logró». O es constancia: «3 h por semana».', '«Enviar la postulación antes del 15 de noviembre».')}
@@ -1286,10 +1291,10 @@ function vistaGuia() {
         ${pieza('Paso', 'Las partes de una tarea mediana o grande.', 'cada uno que marcas mueve la barra de la tarea.', '«Ordenar experiencia», «Revisar ortografía».')}
       </ul>
       <p class="ayuda">Y <strong>Por ordenar</strong>: lo que se te ocurre y aún no sabes dónde va. Lo anotas con «Anotar rápido» en Mi día y lo decides después.</p>
-    </section>
+    </details>
 
-    <section class="tarjeta seccion">
-      <h2>Las preguntas para decidir</h2>
+    <details class="tarjeta seccion plegable">
+      <summary><h2>Las preguntas para decidir</h2></summary>
       <p>Pasa cada cosa por estas preguntas, en orden. «¿Qué es esto?» te las hace una por una.</p>
       <ol class="lista-ayuda">
         <li><strong>¿Se hace en menos de 15 minutos?</strong> Si es parte de un proyecto, es una <em>tarea simple</em>. Si no, <em>no va en Rumbo</em>: hazla ahora o déjala en los recordatorios del teléfono.</li>
@@ -1297,20 +1302,20 @@ function vistaGuia() {
         <li><strong>¿Es constancia sin fin, como estudiar o entrenar?</strong> Es un <em>objetivo de tiempo</em> («Dedicarle tiempo»).</li>
         <li><strong>¿Tiene final y necesita 3 o más acciones durante semanas?</strong> Es un <em>proyecto</em>. Si tiene final pero es un solo resultado, es un <em>objetivo</em>.</li>
       </ol>
-    </section>
+    </details>
 
-    <section class="tarjeta seccion">
-      <h2>Principal, secundario o en pausa</h2>
+    <details class="tarjeta seccion plegable">
+      <summary><h2>Principal, secundario o en pausa</h2></summary>
       <ul class="lista-ayuda">
         <li><strong>Principal:</strong> si este mes no avanza, te va a pesar. Suele tener plazo o un impacto grande. Máximo 3, mejor 2.</li>
         <li><strong>Secundario:</strong> lo quieres avanzar, pero puede esperar una semana. Rumbo te lo propone cuando te sobra tiempo.</li>
         <li><strong>En pausa:</strong> para «algún día». Créalo y pausalo: sale de tu cabeza sin pedirte tiempo.</li>
       </ul>
       <p class="ayuda">Si dudas: «Si este mes solo pudiera avanzar 2 cosas, ¿estaría esta?». Si no es un sí inmediato, es secundario.</p>
-    </section>
+    </details>
 
-    <section class="tarjeta seccion">
-      <h2>Cómo cargarlo para no rendirte</h2>
+    <details class="tarjeta seccion plegable">
+      <summary><h2>Cómo cargarlo para no rendirte</h2></summary>
       <ol class="lista-ayuda">
         <li><strong>Vacía la cabeza (10 min):</strong> escribe todo lo pendiente, sin ordenar. Puedes usar «Anotar rápido».</li>
         <li><strong>Clasifica</strong> cada cosa con «¿Qué es esto?».</li>
@@ -1319,10 +1324,10 @@ function vistaGuia() {
         <li><strong>La primera semana, usa solo Mi día:</strong> aceptar, hacer y marcar. Ajustas en la revisión semanal.</li>
       </ol>
       <p class="ayuda">Cargar 12 proyectos con 40 tareas el primer día es la forma más rápida de abandonar. Con poco cargado, Mi día te muestra 1 a 3 cosas, y así está pensado. <em>(Práctica común de organización.)</em></p>
-    </section>
+    </details>
 
-    <section class="tarjeta seccion">
-      <h2>Si usas otra app para estudiar o practicar</h2>
+    <details class="tarjeta seccion plegable">
+      <summary><h2>Si usas otra app para estudiar o practicar</h2></summary>
       <p>Rumbo no se conecta con otras apps: no lee ni sincroniza sus datos. Tú pasas un solo dato, a mano, para no registrar lo mismo dos veces.</p>
       <ul class="lista-ayuda">
         <li><strong>En Rumbo:</strong> el proyecto, el objetivo y la tarea («Preparar el examen», «Estudiar el capítulo 4»), sin pasos por capítulo ni por lección.</li>
@@ -1331,7 +1336,7 @@ function vistaGuia() {
         <li><strong>Notas en Rumbo:</strong> solo lo que cambia el plan o crea una tarea («Repasar el capítulo 4 antes del ensayo»).</li>
         <li><strong>Lo que haces por gusto,</strong> y que no es parte de un proyecto, puede quedarse solo en la otra app.</li>
       </ul>
-    </section>`;
+    </details>`;
 }
 
 // ---------- Tutorial (cuadro por cuadro, con seguimiento en vivo) ----------
@@ -1575,6 +1580,7 @@ function crearDesdeClasificar() {
     if (!objetivoId) return;
     const tamano = paso.id === 'tarea-simple' ? { tamano: 'simple', minutos: L.TAMANOS.simple.minutos } : L.TAREA_RAPIDA;
     const tarea = L.nuevaTarea({ id: crearId(), objetivoId, titulo: texto, ...tamano, creado: hoy() });
+    mostrarTareaNueva(objetivoId);
     $dialogo.close();
     cambiar((d) => {
       d.tareas.push(tarea);
@@ -1915,6 +1921,7 @@ function dialogoTarea(objetivoId, t = null) {
       const errores = L.erroresTarea(tarea, new Map(datos.objetivos.map((x) => [x.id, x])));
       if (errores.length) return textoErrores(errores);
       const reabre = o.logrado && nueva;
+      if (nueva) mostrarTareaNueva(tarea.objetivoId);
       cambiar((d) => {
         if (nueva) d.tareas.push(tarea);
         else {
@@ -2091,6 +2098,7 @@ function dialogoAnotar() {
           // no pasa nada si no se puede recordar
         }
         const tarea = L.nuevaTarea({ id: crearId(), objetivoId, titulo: texto.slice(0, 300), ...L.TAREA_RAPIDA, creado: hoy() });
+        mostrarTareaNueva(objetivoId);
         cambiar((d) => d.tareas.push(tarea), `Anotado en "${buscar(datos.objetivos, objetivoId).nombre}".`);
       } else {
         cambiar((d) => d.bandeja.push({ id: crearId(), texto: texto.slice(0, 300), fecha: hoy() }), 'Anotado en «Por ordenar».');
@@ -2114,6 +2122,7 @@ function dialogoOrdenar(id) {
       if (!objetivoId) return 'Elige un objetivo (o crea uno en tus proyectos).';
       if (!texto) return 'La tarea no puede quedar vacía.';
       const tarea = L.nuevaTarea({ id: crearId(), objetivoId, titulo: texto, ...L.TAREA_RAPIDA, creado: hoy() });
+      mostrarTareaNueva(objetivoId);
       cambiar((d) => {
         d.bandeja = d.bandeja.filter((x) => x.id !== id);
         d.tareas.push(tarea);
@@ -2633,6 +2642,7 @@ const acciones = {
     });
     const errores = L.erroresTarea(tarea, new Map(datos.objetivos.map((x) => [x.id, x])));
     if (errores.length) return avisar(textoErrores(errores));
+    mostrarTareaNueva(ideas.objetivoId);
     cambiar((d) => {
       d.tareas.push(tarea);
       L.reabrirSiPendiente(d, tarea.objetivoId);
