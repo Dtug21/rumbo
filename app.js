@@ -4,7 +4,7 @@ import { cargar, guardar, crearId, guardarCopiaPrevia, leerCopiaPrevia, pedirPer
 import { proyectoEjemplo } from './ejemplo.js';
 import { PLANTILLAS, aplicarPlantilla } from './plantillas.js';
 import { codificar, decodificar, puedeTraspasar } from './traspaso.js';
-import { generarIcs, plazosParaCalendario } from './calendario.js';
+import { generarIcs, plazosParaCalendario, bloqueValido, enlaceGoogle, enlaceOutlook } from './calendario.js';
 
 const $main = document.getElementById('principal');
 const $toast = document.getElementById('toast');
@@ -334,7 +334,8 @@ function notasItemHtml(i, fecha) {
 function itemHtml(i) {
   const cerrado = i.hecho ? ' hecho' : '';
   const notas = notasItemHtml(i, hoy());
-  const quitar = boton('item-quitar', 'Quitar', { id: i.id, clase: 'chico plano', etiqueta: `Quitar del plan: ${nombreDe(i)}` });
+  const claveCal = i.tipo === 'tarea' ? `t:${i.tarea.id}` : `${i.tipo === 'tiempo' ? 'o' : 'p'}:${i.objetivo.id}`;
+  const quitar = (i.hecho ? '' : boton('calendario', 'Reservar en calendario', { id: claveCal, clase: 'chico plano', etiqueta: `Reservar en mi calendario: ${nombreDe(i)}` })) + boton('item-quitar', 'Quitar', { id: i.id, clase: 'chico plano', etiqueta: `Quitar del plan: ${nombreDe(i)}` });
   const sesionHecha = i.hecho ? '<span class="chip en-plan">Sesión hecha</span>' : '';
 
   if (i.tipo === 'tiempo') {
@@ -597,6 +598,7 @@ function recomendacionHtml(r) {
     <div class="fila-botones">
       ${boton('aceptar', 'Aceptar', { id: r.clave, clase: 'chico primario', etiqueta: `Aceptar: ${nombreDe(r)}` })}
       ${boton('otra', 'Otra', { id: r.clave, etiqueta: `Mostrar otra en vez de: ${nombreDe(r)}` })}
+      ${boton('calendario', 'Reservar en calendario', { id: r.clave, clase: 'chico plano', etiqueta: `Reservar en mi calendario: ${nombreDe(r)}` })}
     </div>
   </li>`;
 }
@@ -929,6 +931,7 @@ function tareaHtml(t) {
             t.hecha ? '' : L.enEspera(t, hoy())
               ? boton('retomar-tarea', 'Retomar ahora', { id: t.id, etiqueta: `Retomar ahora: ${t.titulo}` })
               : boton('poner-espera', 'Poner en espera…', { id: t.id, etiqueta: `Poner en espera: ${t.titulo}` }),
+            t.hecha ? '' : boton('calendario', 'Reservar en calendario…', { id: `t:${t.id}`, etiqueta: `Reservar en mi calendario: ${t.titulo}` }),
             t.hecha ? '' : boton('tarea-subir', '↑ Antes', { id: t.id, etiqueta: `Hacer antes: ${t.titulo}` }),
             t.hecha ? '' : boton('tarea-bajar', '↓ Después', { id: t.id, etiqueta: `Hacer después: ${t.titulo}` }),
             boton('borrar-tarea', 'Borrar', { id: t.id, clase: 'chico peligro', etiqueta: `Borrar: ${t.titulo}` }),
@@ -2489,14 +2492,72 @@ function confirmarReemplazo(nuevos, origen) {
   );
 }
 
-function bajarIcs({ plazos = [], diario = null, semanal = null }) {
-  const blob = new Blob([generarIcs({ plazos, diario, semanal, hoy: hoy() })], { type: 'text/calendar;charset=utf-8' });
+function bajarIcs({ plazos = [], diario = null, semanal = null, bloques = [] }) {
+  const blob = new Blob([generarIcs({ plazos, diario, semanal, bloques, hoy: hoy() })], { type: 'text/calendar;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = Object.assign(document.createElement('a'), { href: url, download: 'rumbo-recordatorios.ics' });
   document.body.append(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/** Qué se va a reservar en el calendario, según la clave de lo que tocaste (`t:` tarea, `o:` objetivo de tiempo, `p:` planificar). */
+function bloqueDe(clave) {
+  const tipo = clave.slice(0, 1);
+  const id = clave.slice(2);
+  if (tipo === 't') {
+    const t = datos.tareas.find((x) => x.id === id);
+    const o = t && datos.objetivos.find((x) => x.id === t.objetivoId);
+    const p = o && datos.proyectos.find((x) => x.id === o.proyectoId);
+    return t && p ? { uid: `bloque-${clave}`, titulo: t.titulo, detalle: `${p.nombre} · ${o.nombre}`, minutos: Math.max(15, Math.min(180, t.minutos || 60)) } : null;
+  }
+  const o = datos.objetivos.find((x) => x.id === id);
+  const p = o && datos.proyectos.find((x) => x.id === o.proyectoId);
+  if (!o || !p) return null;
+  return { uid: `bloque-${clave}`, titulo: tipo === 'p' ? `Planificar: ${o.nombre}` : o.nombre, detalle: p.nombre, minutos: tipo === 'p' ? 15 : 60 };
+}
+
+/** Reservar tiempo para algo en cualquier calendario: elige día, hora y duración, y descarga el archivo o abre Google u Outlook. */
+function dialogoCalendario(clave) {
+  const base = bloqueDe(clave);
+  if (!base) return avisar('No encuentro eso para agendarlo.');
+  // Por defecto, hoy a la próxima hora en punto; si ya es tarde, mañana a las 9:00.
+  const horaSig = new Date().getHours() + 1;
+  const dia = horaSig >= 22 ? L.sumarDias(hoy(), 1) : hoy();
+  const hora = horaSig >= 22 ? '09:00' : `${String(horaSig).padStart(2, '0')}:00`;
+  const MALO = 'Revisa el día, la hora y la duración (entre 5 y 720 minutos).';
+  const leer = () => {
+    const f = new FormData($dialogo.querySelector('form'));
+    const fecha = String(f.get('fecha') ?? '');
+    return { ...base, uid: `${base.uid}-${fecha}@rumbo`, fecha, hora: String(f.get('hora') ?? ''), minutos: Number(f.get('minutos')) };
+  };
+  const form = abrirDialogo(
+    'Reservar en mi calendario',
+    `<p class="ayuda"><strong>${esc(base.titulo)}</strong><br>${esc(base.detalle)}</p>
+     <div class="campo"><label for="cb-fecha">Día</label><input id="cb-fecha" name="fecha" type="date" value="${dia}" min="${hoy()}" required></div>
+     <div class="campo"><label for="cb-hora">Hora de inicio</label><input id="cb-hora" name="hora" type="time" value="${hora}" required></div>
+     <div class="campo"><label for="cb-min">Duración (minutos)</label><input id="cb-min" name="minutos" type="number" inputmode="numeric" min="5" max="720" step="5" value="${base.minutos}" required></div>
+     <p class="ayuda">El archivo (.ics) sirve para cualquier calendario: Google, Apple, Outlook, Thunderbird, Proton… Google y Outlook también se abren directo, con el evento ya escrito (su página recibe solo el título, el detalle y la hora, y únicamente si los tocas).</p>`,
+    () => {
+      const b = leer();
+      if (!bloqueValido(b)) return MALO;
+      bajarIcs({ bloques: [b] });
+      avisar('Archivo descargado. Ábrelo y elige tu calendario.');
+    },
+    'Descargar (.ics)',
+    '<button type="button" data-destino="google">Google Calendar</button><button type="button" data-destino="outlook">Outlook</button>',
+  );
+  form.querySelectorAll('[data-destino]').forEach((boton_) => boton_.addEventListener('click', () => {
+    const b = leer();
+    const $e = form.querySelector('[data-error]');
+    if (!bloqueValido(b)) {
+      $e.textContent = MALO;
+      $e.hidden = false;
+      return;
+    }
+    window.open(boton_.dataset.destino === 'google' ? enlaceGoogle(b) : enlaceOutlook(b), '_blank', 'noopener');
+  }));
 }
 
 /** Un solo paso para pedir el recordatorio: la hora, y listo (el archivo se abre en tu calendario). */
@@ -2814,6 +2875,7 @@ const acciones = {
   },
   'omitir-cierre': () => cambiar((d) => (d.meta.cierreOmitido = hoy())),
   recordatorio: () => dialogoRecordatorio(),
+  calendario: (id) => dialogoCalendario(id),
   'omitir-recordatorio': () => cambiar((d) => (d.meta.recordatorioVisto = '2000-01-01')),
   'omitir-instalar': () => cambiar((d) => (d.meta.instalarVisto = '2000-01-01')), // en el pasado: nunca más
   'instalar-app': async () => {

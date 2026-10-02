@@ -81,9 +81,10 @@ const horaValida = (h) => /^([01]\d|2[0-3]):[0-5]\d$/.test(h);
  * - `plazos`: de `plazosParaCalendario`; cada uno es un evento de día completo con aviso el día antes (9:00) y ese día (9:00).
  * - `diario: { hora, texto }`: recordatorio todos los días a esa hora (hora de tu reloj).
  * - `semanal: { hora, texto }`: recordatorio de tu revisión semanal, los domingos.
+ * - `bloques`: tiempo reservado para algo puntual (`bloqueValido`): un evento con fecha, hora y duración, con aviso 10 minutos antes.
  * Los eventos llevan un identificador estable: si importas el archivo de nuevo, tu calendario actualiza en vez de duplicar.
  */
-export function generarIcs({ plazos = [], diario = null, semanal = null, hoy, ahora = new Date() }) {
+export function generarIcs({ plazos = [], diario = null, semanal = null, bloques = [], hoy, ahora = new Date() }) {
   const sello = utc(ahora);
   const l = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Rumbo//Recordatorios//ES', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:Rumbo'];
   const alarma = (disparo, texto) => ['BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${escaparIcs(texto)}`, `TRIGGER:${disparo}`, 'END:VALARM'];
@@ -101,6 +102,39 @@ export function generarIcs({ plazos = [], diario = null, semanal = null, hoy, ah
     l.push('BEGIN:VEVENT', 'UID:semanal@rumbo', `DTSTAMP:${sello}`, `DTSTART:${flotante(dia, semanal.hora)}`, `DTEND:${flotante(dia, sumarMinutos(semanal.hora, 20))}`,
       'RRULE:FREQ=WEEKLY;BYDAY=SU', `SUMMARY:${escaparIcs(semanal.texto)}`, 'TRANSP:TRANSPARENT', ...alarma('PT0S', semanal.texto), 'END:VEVENT');
   }
+  for (const b of bloques.filter(bloqueValido)) {
+    const fin = finDelBloque(b);
+    l.push('BEGIN:VEVENT', `UID:${b.uid}`, `DTSTAMP:${sello}`, `DTSTART:${flotante(b.fecha, b.hora)}`, `DTEND:${flotante(fin.fecha, fin.hora)}`,
+      `SUMMARY:${escaparIcs(b.titulo)}`, `DESCRIPTION:${escaparIcs(b.detalle ?? '')}`, ...alarma('-PT10M', b.titulo), 'END:VEVENT');
+  }
   l.push('END:VCALENDAR');
   return `${l.map(plegarLinea).join('\r\n')}\r\n`;
+}
+
+// ---------- Un bloque de tiempo para algo puntual: archivo .ics o enlace a Google Calendar / Outlook ----------
+
+/** `{ uid, titulo, detalle, fecha: 'YYYY-MM-DD', hora: 'HH:MM', minutos }` con fecha, hora y duración válidas (5 a 720 min). */
+export const bloqueValido = (b) =>
+  !!b && typeof b.titulo === 'string' && b.titulo.trim() !== '' && /^\d{4}-\d{2}-\d{2}$/.test(b.fecha ?? '') && horaValida(b.hora ?? '') && Number.isInteger(b.minutos) && b.minutos >= 5 && b.minutos <= 720;
+
+/** Fin del bloque (puede caer al día siguiente si empieza tarde). */
+export function finDelBloque(b) {
+  const [a, m, d] = b.fecha.split('-').map(Number);
+  const [h, mi] = b.hora.split(':').map(Number);
+  const x = new Date(Date.UTC(a, m - 1, d, h, mi + b.minutos));
+  return { fecha: `${x.getUTCFullYear()}-${dos(x.getUTCMonth() + 1)}-${dos(x.getUTCDate())}`, hora: `${dos(x.getUTCHours())}:${dos(x.getUTCMinutes())}` };
+}
+
+/** Enlace que abre Google Calendar con el evento ya escrito (hora de tu calendario). Nada se envía hasta que lo abres. */
+export function enlaceGoogle(b) {
+  const fin = finDelBloque(b);
+  const q = new URLSearchParams({ action: 'TEMPLATE', text: b.titulo, details: b.detalle ?? '', dates: `${flotante(b.fecha, b.hora)}/${flotante(fin.fecha, fin.hora)}` });
+  return `https://calendar.google.com/calendar/render?${q}`;
+}
+
+/** Enlace que abre Outlook en la web (cuentas outlook.com / Hotmail / Microsoft 365) con el evento escrito. */
+export function enlaceOutlook(b) {
+  const fin = finDelBloque(b);
+  const q = new URLSearchParams({ path: '/calendar/action/compose', rru: 'addevent', subject: b.titulo, body: b.detalle ?? '', startdt: `${b.fecha}T${b.hora}:00`, enddt: `${fin.fecha}T${fin.hora}:00` });
+  return `https://outlook.live.com/calendar/0/deeplink/compose?${q}`;
 }
