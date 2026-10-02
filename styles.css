@@ -625,3 +625,12 @@ form.es-tiempo.con-unidad .solo-horas { display: none; }
 .avance-metas { list-style: none; padding: 0; margin: 0.25rem 0 0.5rem; display: grid; gap: 0.6rem; }
 .aviso.carga { background: var(--aviso-fondo); }
 .aviso.carga .fila-botones { margin-top: 0.5rem; }
+
+/* Resultados (indicadores) */
+.resultados { margin: 0.75rem 0 0.25rem; }
+.lista-resultados { list-style: none; padding: 0; margin: 0.25rem 0 0.5rem; display: grid; gap: 0.4rem; }
+.lista-resultados li { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; background: var(--superficie-2); border-radius: 10px; padding: 0.4rem 0.5rem 0.4rem 0.8rem; }
+.lista-resultados .resultado-dato { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+.lista-resultados.solo-lectura li { padding: 0.4rem 0.8rem; flex-wrap: wrap; }
+.lista-resultados button { min-width: 56px; min-height: 44px; font-weight: 800; flex: none; }
+.resultado-objetivo { margin: 0.5rem 0 0; font-weight: 700; color: var(--texto); }

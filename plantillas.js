@@ -9,7 +9,7 @@ export const PLANTILLAS = Object.freeze([
     id: 'app',
     nombre: 'Lanzar una app o producto digital',
     descripcion: 'De la idea a las primeras personas usándolo, sin construir de más.',
-    ejemplo: 'FarmaCheck',
+    ejemplo: 'Mi app',
     objetivos: [
       {
         nombre: 'Primera versión en manos de 5 usuarios', criterio: '5 personas la usaron y me dieron su opinión',
@@ -48,7 +48,7 @@ export const PLANTILLAS = Object.freeze([
     ejemplo: 'Postulación cargo diurno',
     objetivos: [
       {
-        nombre: 'Postulación enviada', criterio: 'Envié todo lo que piden antes del plazo',
+        nombre: 'Postulación enviada', criterio: 'Envié todo lo que piden antes del plazo', indicadores: ['Respuestas', 'Entrevistas', 'Ofertas'],
         tareas: [
           t('Leer bien las bases y los requisitos', 'simple', 30),
           t('Actualizar el currículum', 'media', 90, ['Experiencia reciente', 'Formación y cursos', 'Revisar ortografía']),
@@ -73,7 +73,7 @@ export const PLANTILLAS = Object.freeze([
     ejemplo: 'Mi emprendimiento',
     objetivos: [
       {
-        nombre: 'Confirmar que alguien pagaría', criterio: '10 conversaciones con posibles clientes y al menos 3 interesados reales',
+        nombre: 'Confirmar que alguien pagaría', criterio: '10 conversaciones con posibles clientes y al menos 3 interesados reales', indicadores: ['Interesados', 'Ventas'],
         tareas: [
           t('Escribir a quién le resuelves qué problema', 'simple', 30),
           t('Conversar con 10 posibles clientes', 'amplia', 300, ['Hacer la lista de 10', 'Preparar preguntas sin vender', 'Tener las conversaciones', 'Resumir lo que se repite']),
@@ -108,7 +108,7 @@ export const PLANTILLAS = Object.freeze([
     objetivos: [
       { nombre: 'Crear cada semana', tipo: 'tiempo', horas: 2 },
       {
-        nombre: 'Obra terminada y compartida', criterio: 'La publiqué o se la mostré a 3 personas',
+        nombre: 'Obra terminada y compartida', criterio: 'La publiqué o se la mostré a 3 personas', indicadores: ['Personas que la vieron o escucharon'],
         tareas: [
           t('Definir qué significa "terminado"', 'simple', 20),
           t('Primer borrador completo', 'amplia', 240, ['Estructura', 'Primera mitad', 'Segunda mitad', 'Unirlo todo']),
@@ -130,6 +130,7 @@ export function aplicarPlantilla(plantilla, proyectoId, hoy, crearId) {
     objetivos.push(nuevoObjetivo({
       id, proyectoId, nombre: o.nombre, criterio: o.criterio ?? '', creado: hoy,
       tipo: tiempo ? 'tiempo' : 'resultado', minutosMeta: tiempo ? Math.round(o.horas * 60) : null, periodo: tiempo ? 'semana' : null,
+      indicadores: (o.indicadores ?? []).map((nombre) => ({ id: crearId(), nombre, eventos: [] })),
     }));
     for (const x of o.tareas ?? []) {
       tareas.push(nuevaTarea({

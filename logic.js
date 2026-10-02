@@ -42,7 +42,7 @@ export const PASOS_BASE = Object.freeze([
 
 const LIMITES = {
   proyectos: 200, objetivos: 1000, tareas: 5000, pasos: 50, registros: 50000, notas: 20000,
-  texto: 300, criterio: 500, nota: 2000, descripcion: 5000, minutos: 1440, metaMinutos: 100000, etapa: 100, bandeja: 500, momento: 120, nombreTurno: 30, esperando: 120, unidad: 30, cantidad: 10000,
+  texto: 300, criterio: 500, nota: 2000, descripcion: 5000, minutos: 1440, metaMinutos: 100000, etapa: 100, bandeja: 500, momento: 120, nombreTurno: 30, esperando: 120, unidad: 30, cantidad: 10000, indicador: 40, eventos: 3000,
 };
 // Al crear tareas desde una lista (una por línea) parten como medias de 1 h; se ajustan después.
 export const TAREA_RAPIDA = Object.freeze({ tamano: 'media', minutos: 60 });
@@ -235,6 +235,64 @@ export function progresoObjetivo(o, datos, hoy) {
   return { valor, hechas, total: tareas.length };
 }
 
+// ---------- Indicadores de resultado ----------
+
+/**
+ * Un objetivo puede seguir sus RESULTADOS además de su actividad: contadores que cada persona define
+ * («Respuestas», «Entrevistas», «Ventas», «Personas que lo vieron»…) y que anota con +1.
+ * Guardados en el propio objetivo: `indicadores: [{ id, nombre, eventos: [{ fecha, cantidad }] }]`.
+ */
+export const MAX_INDICADORES = 8;
+
+export const nuevoIndicador = (id, nombre) => ({ id, nombre: String(nombre).trim().slice(0, LIMITES.indicador), eventos: [] });
+
+const sumaEventos = (ind, desde, hasta) => (ind.eventos ?? []).filter((e) => (!desde || e.fecha >= desde) && (!hasta || e.fecha <= hasta)).reduce((s, e) => s + e.cantidad, 0);
+
+/**
+ * Cada indicador de un objetivo con su total, los últimos 7 días, los 7 anteriores y, si el objetivo se mide
+ * en unidades, el porcentaje que representa («3 respuestas = 25% de tus postulaciones»).
+ */
+export function resumenIndicadores(o, datos, hoy) {
+  const desde = sumarDias(hoy, -6);
+  const previoDesde = sumarDias(desde, -7);
+  const base = esConteo(o) ? cantidadRegistrada(datos, o.id, 'total', hoy) : 0;
+  return (o.indicadores ?? []).map((ind) => {
+    const total = sumaEventos(ind);
+    return {
+      indicador: ind,
+      total,
+      semana: sumaEventos(ind, desde, hoy),
+      previa: sumaEventos(ind, previoDesde, sumarDias(desde, -1)),
+      porcentajeDe: base > 0 ? Math.round((total / base) * 100) : null,
+      base: base > 0 ? base : null,
+    };
+  });
+}
+
+/** Anota resultados (por defecto, 1) en un indicador, hoy o en otra fecha. Devuelve el indicador, o null si no existe. */
+export function anotarResultado(d, objetivoId, indicadorId, fecha, cantidad = 1) {
+  const ind = d.objetivos.find((o) => o.id === objetivoId)?.indicadores?.find((x) => x.id === indicadorId);
+  if (!ind) return null;
+  const previo = ind.eventos.find((e) => e.fecha === fecha);
+  if (previo) previo.cantidad += cantidad;
+  else ind.eventos.push({ fecha, cantidad });
+  return ind;
+}
+
+/** Nombres escritos en una línea («Respuestas, Entrevistas») → indicadores nuevos, sin repetidos ni vacíos. */
+export function indicadoresDesdeTexto(texto, crearId) {
+  const vistos = new Set();
+  const lista = [];
+  for (const parte of String(texto ?? '').split(/[,\n;]/)) {
+    const nombre = parte.trim().slice(0, LIMITES.indicador);
+    const clave = nombre.toLowerCase();
+    if (!nombre || vistos.has(clave) || lista.length >= MAX_INDICADORES) continue;
+    vistos.add(clave);
+    lista.push(nuevoIndicador(crearId(), nombre));
+  }
+  return lista;
+}
+
 /**
  * Cuánto avanzó una tarea (0 a 1) entre `desde` y hoy, con las fechas que guarda Rumbo:
  * pasos marcados (`hechoEl`), el cierre de la tarea (`hechaEl`) y, sin pasos, el tiempo registrado.
@@ -327,8 +385,16 @@ export function ordenarProyectos(datos, hoy) {
 
 // ---------- Capacidad del día ----------
 
-/** Turnos de enfermería típicos: largo, noche, saliente y libre. Los minutos son un punto de partida para ajustar. */
-export const CICLO_CUARTO_TURNO = Object.freeze({ nombres: ['Largo', 'Noche', 'Saliente', 'Libre'], minutos: [30, 60, 45, 240] });
+/**
+ * Ciclos de turnos de ejemplo para partir (los minutos libres son un punto de partida: cada persona los ajusta).
+ * Sirven para cualquier trabajo por turnos, no solo el de salud.
+ */
+export const CICLOS_EJEMPLO = Object.freeze([
+  { id: 'cuarto', nombre: '4º turno (largo, noche, saliente, libre)', nombres: ['Largo', 'Noche', 'Saliente', 'Libre'], minutos: [30, 60, 45, 240] },
+  { id: 'dos-dos', nombre: '2 y 2 (dos de turno, dos libres)', nombres: ['Turno', 'Turno', 'Libre', 'Libre'], minutos: [45, 45, 240, 240] },
+  { id: 'semana', nombre: 'Empezar en blanco (7 días)', nombres: ['', '', '', '', '', '', ''], minutos: [120, 120, 120, 120, 120, 120, 120] },
+]);
+export const CICLO_CUARTO_TURNO = CICLOS_EJEMPLO[0];
 export const CICLO_MIN = 2;
 export const CICLO_MAX = 14;
 
@@ -448,6 +514,7 @@ export function candidatos(datos, hoy) {
   const plan = planDeHoy(datos, hoy);
   const fuera = new Set([...plan.items.map(claveItem), ...plan.descartadas]);
   const foco = focoDeLaSemana(datos, hoy);
+  const factorTareas = factorEstimacion(datos);
   const lista = [];
 
   // Puntos del proyecto y del foco de la semana. "Es principal" suma pero no se escribe: se repetiría en casi todo.
@@ -581,8 +648,11 @@ export function candidatos(datos, hoy) {
       }
       // En empate, primero la que va antes en el orden (y no la más corta).
       if (t.id === disponibles[0].id && disponibles.length > 1) puntos += 1;
+      const minutosT = minutosSesion(t, datos);
+      const costo = costoTarea(t, minutosT, factorTareas);
+      if (costo !== minutosT) motivos.push(`Sueles tardar ×${factorTareas.toFixed(1).replace('.', ',')} lo que estimas: cuenta ${formatoDuracion(costo)} de tu día`);
       lista.push({
-        clave, tipo: 'tarea', proyecto: p, objetivo: o, tarea: t, minutos: minutosSesion(t, datos), puntos, motivos, ajustable: t.tamano !== 'simple',
+        clave, tipo: 'tarea', proyecto: p, objetivo: o, tarea: t, minutos: minutosT, costo, puntos, motivos, ajustable: t.tamano !== 'simple',
         vencido: t.plazo ? vencido(t.plazo, 'tarea', t.id) : vencido(o.plazo, 'objetivo', o.id),
       });
     }
@@ -605,7 +675,8 @@ export function elegirRecomendaciones(lista, disponibles, max = MAX_RECOMENDACIO
     if ((porObjetivo.get(c.objetivo.id) ?? 0) >= MAX_POR_OBJETIVO) continue;
     let minutos = c.minutos;
     let unidades = c.unidades ?? null;
-    if (minutos > quedan) {
+    const k = c.costo && c.minutos ? c.costo / c.minutos : 1; // lo que de verdad ocupa cada minuto estimado
+    if (minutos * k > quedan) {
       if (!c.ajustable) continue;
       if (unidades) {
         // Por conteo: entran las unidades enteras que quepan (cada una con su tiempo).
@@ -614,13 +685,13 @@ export function elegirRecomendaciones(lista, disponibles, max = MAX_RECOMENDACIO
         if (unidades < 1) continue;
         minutos = unidades * porUnidad;
       } else {
-        if (quedan < SESION_MIN) continue;
-        minutos = Math.floor(quedan / 5) * 5;
+        minutos = Math.floor(quedan / k / 5) * 5;
+        if (minutos < SESION_MIN) continue;
       }
     }
-    elegidas.push(minutos === c.minutos ? c : { ...c, minutos, unidades, acortada: true });
+    elegidas.push(minutos === c.minutos ? c : { ...c, minutos, costo: c.costo ? Math.round(minutos * k) : c.costo, unidades, acortada: true });
     porObjetivo.set(c.objetivo.id, (porObjetivo.get(c.objetivo.id) ?? 0) + 1);
-    quedan -= minutos;
+    quedan -= Math.round(minutos * k);
   }
   return elegidas;
 }
@@ -629,7 +700,8 @@ export function elegirRecomendaciones(lista, disponibles, max = MAX_RECOMENDACIO
 export function vistaHoy(datos, hoy, { ignorarCapacidad = false } = {}) {
   const items = resolverItems(datos, planDeHoy(datos, hoy));
   const hechos = minutosHoy(datos, hoy);
-  const pendientes = items.filter((i) => !i.hecho).reduce((s, i) => s + i.minutos, 0);
+  const factor = factorEstimacion(datos);
+  const pendientes = items.filter((i) => !i.hecho).reduce((s, i) => s + (i.tipo === 'tarea' ? costoTarea(i.tarea, i.minutos, factor) : i.minutos), 0);
   const libres = minutosLibres(datos.disponibilidad, hoy);
   const capacidad = capacidadDia(datos.disponibilidad, hoy);
   const todos = candidatos(datos, hoy);
@@ -771,6 +843,19 @@ export function calibracionEstimaciones(datos) {
   return { factor: real / estimado, n, real, estimado };
 }
 
+/**
+ * Cuánto multiplicar tus estimaciones al planificar el día: tu calibración (cuánto más o menos tardas de lo que estimas),
+ * solo cuando hay datos suficientes y la diferencia importa (menos de 15% se ignora). Entre ×0,7 y ×2.
+ */
+export function factorEstimacion(datos) {
+  const c = calibracionEstimaciones(datos);
+  if (!c || (c.factor > 0.85 && c.factor < 1.15)) return 1;
+  return Math.min(2, Math.max(0.7, c.factor));
+}
+
+/** Lo que una tarea de verdad ocupa de tu día: su estimación por tu factor (las simples y el resto, tal cual). */
+const costoTarea = (t, minutos, factor) => (t && t.tamano !== 'simple' ? Math.round(minutos * factor) : minutos);
+
 /** Todo lo de la pantalla «Mi avance»: esta semana contra la anterior, plan cumplido, metas, riesgos, carga y estimaciones. */
 export function avanceSemanal(datos, hoy) {
   const desde = sumarDias(hoy, -6);
@@ -808,6 +893,9 @@ export function avanceSemanal(datos, hoy) {
     enRiesgo: resumen.enRiesgo,
     carga,
     calibracion: calibracionEstimaciones(datos),
+    resultados: datos.objetivos
+      .filter((o) => !o.archivado && proyectos.get(o.proyectoId)?.estado === 'activo' && (o.indicadores ?? []).length)
+      .map((o) => ({ objetivo: o, indicadores: resumenIndicadores(o, datos, hoy) })),
     porProyecto: [...porProyecto.entries()].map(([id, minutos]) => ({ proyecto: proyectos.get(id), minutos })).sort((a, b) => b.minutos - a.minutos),
   };
 }
@@ -1004,11 +1092,11 @@ export function leerIdeasObjetivos(texto) {
  */
 export const PREGUNTAS_CLASIFICAR = Object.freeze({
   corta: { texto: '¿Se puede hacer en menos de 15 minutos?', ayuda: 'Una llamada, un correo, un trámite rápido.', si: 'parte', no: 'sentadas' },
-  parte: { texto: '¿Es parte de un proyecto que tienes o quieres tener?', ayuda: 'Por ejemplo, «pedir la carta de recomendación» es parte de «Postular a la UCI».', si: 'tarea-simple', no: 'fuera' },
+  parte: { texto: '¿Es parte de un proyecto que tienes o quieres tener?', ayuda: 'Por ejemplo, «pedir la carta de recomendación» es parte de «Postular a un trabajo».', si: 'tarea-simple', no: 'fuera' },
   sentadas: { texto: '¿Lo terminas en una o pocas sentadas, unas horas en total?', ayuda: 'Por ejemplo, «actualizar el CV» o «leer las bases del concurso».', si: 'tarea', no: 'final' },
   final: { texto: '¿Tiene un final claro, un día en que dirás «listo, lo logré»?', ayuda: '«Aprobar el concurso» tiene final. «Estudiar inglés» no.', si: 'varias', no: 'constancia' },
   constancia: { texto: '¿Es algo que quieres hacer con constancia, como estudiar, practicar o entrenar?', ayuda: 'Lo que importa es dedicarle tiempo cada semana, no terminarlo.', si: 'objetivo-tiempo', no: 'idea' },
-  varias: { texto: '¿Necesita 3 o más acciones distintas, durante semanas?', ayuda: '«Postular a la UCI» necesita CV, cartas, documentos y entrevista.', si: 'importa', no: 'objetivo' },
+  varias: { texto: '¿Necesita 3 o más acciones distintas, durante semanas?', ayuda: '«Postular a un trabajo» necesita CV, cartas, documentos y entrevista.', si: 'importa', no: 'objetivo' },
   importa: { texto: 'Si este mes solo pudieras avanzar 2 cosas, ¿estaría esta?', ayuda: 'Piensa en plazos, en tu trabajo, tu plata o tu carrera.', si: 'principal', no: 'este-mes' },
   'este-mes': { texto: '¿Quieres avanzarla este mes, aunque sea un poco?', ayuda: 'Si es para «algún día», mejor dejarla en pausa.', si: 'secundario', no: 'pausado' },
 });
@@ -1093,7 +1181,7 @@ export function tamanoPorMinutos(m) {
 /** Objetivo nuevo con todos sus campos (etapa 1, sin etapa anterior). */
 export function nuevoObjetivo(campos) {
   return {
-    tipo: 'resultado', plazo: null, minutosMeta: null, periodo: null, unidad: '', metaCantidad: null, minutosPorUnidad: null, logrado: false,
+    tipo: 'resultado', plazo: null, minutosMeta: null, periodo: null, unidad: '', metaCantidad: null, minutosPorUnidad: null, indicadores: [], logrado: false,
     criterio: '', anteriorId: null, archivado: false, etapa: 1, logradoEl: null, ...campos,
   };
 }
@@ -1165,6 +1253,8 @@ export function ampliarObjetivo(d, anteriorId, nuevo, { llevarPendientes = false
     anterior.logradoEl = fecha;
   }
   const siguiente = nuevoObjetivo({ ...nuevo, proyectoId: anterior.proyectoId, anteriorId, etapa: anterior.etapa + 1 });
+  // Los mismos indicadores siguen en la nueva etapa (la anterior conserva lo que anotaste).
+  if (!nuevo.indicadores?.length && anterior.indicadores?.length) siguiente.indicadores = anterior.indicadores.map((i) => ({ id: i.id, nombre: i.nombre, eventos: [] }));
   d.objetivos.push(siguiente);
   if (siguiente.tipo === 'resultado') {
     if (llevarPendientes) {
@@ -1279,6 +1369,23 @@ export function erroresObjetivo(o, idsProyecto, objetivos = null) {
       if (!esEntero(o.minutosPorUnidad, 1, 480)) e.push('los minutos por unidad deben ser de 1 a 480');
     }
   } else if (o.unidad) e.push('la unidad solo va en objetivos de tiempo');
+  if (o.indicadores !== undefined) {
+    const inds = o.indicadores;
+    if (!Array.isArray(inds) || inds.length > MAX_INDICADORES) e.push(`máximo ${MAX_INDICADORES} indicadores de resultado`);
+    else {
+      const ids = new Set();
+      for (const ind of inds) {
+        const ok = ind && typeof ind === 'object' && esId(ind.id) && !ids.has(ind.id) && esTexto(ind.nombre, LIMITES.indicador) &&
+          Array.isArray(ind.eventos) && ind.eventos.length <= LIMITES.eventos &&
+          ind.eventos.every((ev) => ev && esFechaValida(ev.fecha) && esEntero(ev.cantidad, 1, LIMITES.cantidad));
+        if (!ok) {
+          e.push('hay indicadores de resultado no válidos');
+          break;
+        }
+        ids.add(ind.id);
+      }
+    }
+  }
   if (typeof o.logrado !== 'boolean') e.push('logrado no válido');
   if (!esFechaOpcional(o.logradoEl)) e.push('fecha de logro no válida');
   if (typeof o.criterio !== 'string' || o.criterio.length > LIMITES.criterio) e.push('la meta concreta es muy larga');
