@@ -25,6 +25,8 @@ export const CERCA_DE_LA_META = 0.75;
 // Un ritmo semanal atrasado suma hasta 40 puntos a comienzos de semana y hasta 70 en los últimos 3 días.
 export const PUNTOS_ATRASO_RITMO = 70;
 export const PUNTOS_ATRASO_INICIO = 40;
+// El primer paso que elegiste ayer sube lo suficiente para ir primero, salvo ante un plazo vencido.
+export const PUNTOS_PRIMER_PASO = 45;
 export const DIAS_SECUNDARIO_OLVIDADO = 7;
 // Una tarea sin pasos avanza según el tiempo trabajado, pero nunca pasa de 90% hasta que la terminas.
 export const TOPE_POR_TIEMPO = 0.9;
@@ -42,7 +44,7 @@ export const PASOS_BASE = Object.freeze([
 
 const LIMITES = {
   proyectos: 200, objetivos: 1000, tareas: 5000, pasos: 50, registros: 50000, notas: 20000,
-  texto: 300, criterio: 500, nota: 2000, descripcion: 5000, minutos: 1440, metaMinutos: 100000, etapa: 100, bandeja: 500, momento: 120, nombreTurno: 30, esperando: 120, unidad: 30, cantidad: 10000, indicador: 40, eventos: 3000,
+  texto: 300, criterio: 500, nota: 2000, descripcion: 5000, minutos: 1440, metaMinutos: 100000, etapa: 100, bandeja: 500, momento: 120, nombreTurno: 30, esperando: 120, unidad: 30, cantidad: 10000, indicador: 40, eventos: 3000, porQue: 300,
 };
 // Al crear tareas desde una lista (una por línea) parten como medias de 1 h; se ajustan después.
 export const TAREA_RAPIDA = Object.freeze({ tamano: 'media', minutos: 60 });
@@ -626,6 +628,11 @@ export function candidatos(datos, hoy) {
         motivos.push(`Anotaste que falta: ${falta.texto.length > 80 ? `${falta.texto.slice(0, 80)}…` : falta.texto}`);
       }
       puntos += comunes(p, o, motivos);
+      // Lo que elegiste ayer como tu primer paso de hoy (intención de implementación): va primero.
+      if (datos.meta?.primerPaso?.para === hoy && datos.meta.primerPaso.clave === clave) {
+        puntos += PUNTOS_PRIMER_PASO;
+        motivos.unshift('Elegiste empezar por esto');
+      }
       const quieta = diasEntre(t.tocado ?? t.creado, hoy);
       if (quieta >= 2) puntos += Math.min(21, 3 * quieta);
       if (quieta >= 3) motivos.push(`Llevas ${quieta} días sin tocarla`);
@@ -697,7 +704,7 @@ export function elegirRecomendaciones(lista, disponibles, max = MAX_RECOMENDACIO
 }
 
 /** Todo lo que necesita la pantalla Hoy. */
-export function vistaHoy(datos, hoy, { ignorarCapacidad = false } = {}) {
+export function vistaHoy(datos, hoy, { ignorarCapacidad = false, soloPoquito = false } = {}) {
   const items = resolverItems(datos, planDeHoy(datos, hoy));
   const hechos = minutosHoy(datos, hoy);
   const factor = factorEstimacion(datos);
@@ -705,7 +712,9 @@ export function vistaHoy(datos, hoy, { ignorarCapacidad = false } = {}) {
   const libres = minutosLibres(datos.disponibilidad, hoy);
   const capacidad = capacidadDia(datos.disponibilidad, hoy);
   const todos = candidatos(datos, hoy);
-  const recomendaciones = elegirRecomendaciones(todos, ignorarCapacidad ? Infinity : capacidad - hechos - pendientes);
+  const recomendaciones = soloPoquito
+    ? recomendacionMinima(todos)
+    : elegirRecomendaciones(todos, ignorarCapacidad ? Infinity : capacidad - hechos - pendientes);
   // Un proyecto secundario olvidado aparece aparte, "si te sobra tiempo", para que no quede siempre fuera.
   const elegidas = new Set(recomendaciones.map((c) => c.clave));
   const extra =
@@ -724,10 +733,78 @@ export function vistaHoy(datos, hoy, { ignorarCapacidad = false } = {}) {
     capacidad,
     disponibles: capacidad - hechos - pendientes,
     recomendaciones,
-    extra,
+    extra: soloPoquito ? null : extra,
     hayMas: todos.length > 0,
+    soloPoquito,
   };
 }
+
+/** Minutos de «un poquito»: lo mínimo que de verdad cuenta como empezar. */
+export const MINUTOS_POQUITO = 15;
+
+/**
+ * Para los días de poca energía o tiempo: UNA sola cosa, la más importante que se pueda hacer en un rato corto
+ * (una tarea simple, o una sesión acortada a 15 min). Empezar poco sigue siendo avanzar.
+ */
+export function recomendacionMinima(todos) {
+  for (const c of todos) {
+    if (c.tipo === 'planificar') continue; // «planificar» no es hacer: se ofrece, pero después de algo concreto
+    if (c.unidades) {
+      // Por cantidad: una unidad entera, si entra en un rato corto.
+      if (c.objetivo.minutosPorUnidad <= 30) return [{ ...c, unidades: 1, minutos: c.objetivo.minutosPorUnidad, acortada: c.unidades !== 1 }];
+      continue;
+    }
+    if (c.minutos <= 20) return [c];
+    if (c.ajustable) {
+      const k = c.costo && c.minutos ? c.costo / c.minutos : 1;
+      return [{ ...c, minutos: MINUTOS_POQUITO, costo: Math.round(MINUTOS_POQUITO * k), acortada: true }];
+    }
+  }
+  return [];
+}
+
+/**
+ * Cierre del día: qué podría ser tu primer paso de mañana (las 4 cosas que más conviene empezar), para elegir una.
+ * Lo elegido se guarda en `meta.primerPaso = { para: fecha, clave }` y mañana va primero.
+ */
+export function opcionesParaManana(datos, hoy) {
+  const manana = sumarDias(hoy, 1);
+  return candidatos(datos, manana)
+    .filter((c) => c.tipo !== 'planificar')
+    .slice(0, 4)
+    .map((c) => ({ clave: c.clave, titulo: c.tarea?.titulo ?? (c.unidades ? `${c.objetivo.nombre}: ${textoCantidad(c.objetivo, c.unidades)}` : c.objetivo.nombre), proyecto: c.proyecto.nombre, minutos: c.minutos }));
+}
+
+/** ¿Toca ofrecer el cierre del día? Cuando ya hiciste algo hoy y aún no elegiste tu primer paso de mañana. */
+export function tocaCierreDelDia(datos, hoy) {
+  if (datos.meta?.primerPaso?.para === sumarDias(hoy, 1)) return false;
+  return minutosHoy(datos, hoy) > 0 || datos.tareas.some((t) => t.hechaEl === hoy);
+}
+
+/**
+ * Tu semana en un texto corto y positivo para compartir con quien te acompaña (por ejemplo, un amigo o tu pareja).
+ * Solo lo que tú decidas compartir: cuentas, nombres de proyectos y títulos de tareas terminadas.
+ */
+export function resumenParaCompartir(datos, hoy) {
+  const desde = sumarDias(hoy, -6);
+  const a = avanceSemanal(datos, hoy);
+  const fecha = (f) => new Intl.DateTimeFormat('es-CL', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(`${f}T12:00:00Z`));
+  const terminadas = datos.tareas.filter((t) => t.hechaEl && t.hechaEl >= desde && t.hechaEl <= hoy).sort((x, y) => x.hechaEl.localeCompare(y.hechaEl));
+  const lineas = [`Mi semana en Rumbo (${fecha(desde)} – ${fecha(hoy)})`, ''];
+  lineas.push(`• ${a.terminadas === 1 ? '1 tarea terminada' : `${a.terminadas} tareas terminadas`}`);
+  lineas.push(`• ${formatoDuracion(a.minutos)} dedicadas, en ${a.diasConAvance} de 7 días`);
+  if (a.aceptados) lineas.push(`• Hice ${a.hechos} de las ${a.aceptados} cosas que me propuse en mi plan`);
+  if (a.porProyecto.length) lineas.push(`• Mi tiempo fue sobre todo a: ${a.porProyecto.slice(0, 2).map((x) => x.proyecto.nombre).join(' y ')}`);
+  const logrados = datos.objetivos.filter((o) => o.logradoEl && o.logradoEl >= desde && o.logradoEl <= hoy);
+  for (const o of logrados) lineas.push(`• Logré: ${o.nombre}`);
+  if (terminadas.length) {
+    lineas.push('', 'Lo que terminé:');
+    for (const t of terminadas.slice(-6)) lineas.push(`✓ ${t.titulo}`);
+    if (terminadas.length > 6) lineas.push(`…y ${terminadas.length - 6} más`);
+  }
+  return lineas.join('\n');
+}
+
 
 // ---------- Orden, foco, regreso y revisión semanal ----------
 
@@ -760,6 +837,8 @@ export const diasFuera = (meta, hoy) => (meta.ultimaVisita ? Math.max(0, diasEnt
 export function tocaRevisionSemanal(meta, hoy) {
   const dia = diaSemana(hoy);
   if (dia !== 0 && dia !== 1) return false;
+  // Una persona nueva no tiene una semana que revisar: se ofrece desde la segunda semana de uso.
+  if (meta.creado && diasEntre(meta.creado, hoy) < 6) return false;
   return !meta.ultimaRevision || diasEntre(meta.ultimaRevision, hoy) >= 2;
 }
 
@@ -1138,9 +1217,10 @@ export function avanceTutorial(d, { libres = false } = {}) {
     objetivo: d.objetivos.length > 0,
     tareas: d.tareas.length,
     tiempo: d.objetivos.some((o) => o.tipo === 'tiempo'),
-    libres,
     aceptada: Object.values(d.planes).some((p) => p.items.length > 0),
     registrada: d.registros.length > 0 || d.tareas.some((t) => t.hecha),
+    // Quien ya aceptó o registró algo siguió con el tiempo que tiene por defecto: ese paso queda dado por hecho.
+    libres: libres || Object.values(d.planes).some((p) => p.items.length > 0) || d.registros.length > 0,
   };
 }
 
@@ -1348,6 +1428,7 @@ export function erroresProyecto(p) {
   if (!TIPOS_PROYECTO.includes(p.tipo)) e.push('tipo no válido');
   if (!ESTADOS_PROYECTO.includes(p.estado)) e.push('estado no válido');
   if (typeof p.descripcion !== 'string' || p.descripcion.length > LIMITES.descripcion) e.push('descripción muy larga');
+  if (p.porQue !== undefined && (typeof p.porQue !== 'string' || p.porQue.length > LIMITES.porQue)) e.push('«por qué te importa» es muy largo');
   if (!esFechaValida(p.creado)) e.push('fecha de creación no válida');
   return e;
 }
@@ -1521,6 +1602,9 @@ export function validarDatos(d) {
     typeof m.momento !== 'string' || m.momento.length > LIMITES.momento) {
     e.push('meta no válida');
   }
+  const pp = m?.primerPaso;
+  if (pp !== undefined && pp !== null && (typeof pp !== 'object' || !esFechaValida(pp.para) || typeof pp.clave !== 'string' || pp.clave.length > 120)) e.push('el primer paso de mañana no es válido');
+  if (m && !esFechaOpcional(m.instalarVisto)) e.push('meta no válida (instalación)');
   if (!Array.isArray(d.bandeja) || d.bandeja.length > LIMITES.bandeja) e.push('bandeja "por ordenar" no válida');
   else {
     repetidos(d.bandeja, 'Por ordenar');

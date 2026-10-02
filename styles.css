@@ -661,3 +661,22 @@ details.plegable[open] > summary { margin-bottom: 0.5rem; }
   details.mas > summary, details.consejos > summary { min-height: 44px; }
   .pasos label, .checks label { min-height: 44px; }
 }
+
+/* Tutorial discreto: en los pasos de acción, la explicación va a un toque y el panel ocupa poco */
+.tutorial-detalle { margin: 0.1rem 0 0.3rem; }
+.tutorial-detalle > summary { cursor: pointer; color: var(--enlace); font-weight: 700; font-size: 0.85rem; min-height: 32px; display: flex; align-items: center; }
+.tutorial-detalle .tutorial-texto { margin: 0.1rem 0 0.3rem; }
+@media (max-width: 899px) {
+  .tutorial { max-height: 34vh; padding: 0.55rem 0.85rem 0.45rem; }
+  .tutorial-puntos { display: none; }
+  .tutorial h2 { font-size: 1rem; margin: 0.15rem 0 0.1rem; }
+  .tutorial-texto { font-size: 0.88rem; margin: 0.1rem 0 0.25rem; }
+  .tutorial .fila-botones { margin-top: 0.25rem; gap: 0.3rem; }
+  body.con-tutorial .contenido { padding-bottom: calc(34vh + 96px); }
+}
+
+/* Cierre del día e instalar */
+.aviso.cierre { background: var(--menta); border-color: color-mix(in srgb, var(--barra) 40%, transparent); }
+.aviso.cierre p { margin: 0 0 0.5rem; }
+.aviso.cierre select { width: 100%; }
+.aviso.cierre .fila-botones { margin-top: 0.5rem; }
